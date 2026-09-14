@@ -1,2 +1,8 @@
 .claude
 .cursor
+
+# Segredos - nunca versionar (ver .claude/rules/governanca.md)
+.env
+client_secret*.json
+*token*.json
+resources/config-*.env
