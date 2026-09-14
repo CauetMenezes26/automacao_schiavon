@@ -1,0 +1,91 @@
+"""Códigos de divergência da conciliação — a fonte da verdade, em código.
+
+Mesmo arranjo de `categorias.py` e `status_exec.py`: o banco guarda a lista de
+strings (`fat_conciliacao.issue_codes`, `fat_conciliacao_item.issue_codes`), o
+significado mora aqui.
+
+POR QUE ESTE MÓDULO EXISTE
+
+As constantes viviam soltas no topo de `conciliacao/reconcile_quote.py`, e
+`conciliacao/conciliacao_db.py` comparava as mesmas strings escritas à mão
+(`"no_quote_for_item"`, `"handwritten_present"`, ...). Duas listas do mesmo
+vocabulário, sem nada garantindo que combinam.
+
+`issue_codes` é a lista **crua** do que a linha (ou a nota) acumulou:
+`['handwritten_present', 'price_above_quote']` é uma divergência de preço numa
+nota que também tem anotação à mão. O `cod_status` continua sendo o **veredito
+único** derivado dessa lista (`_veredito` em `conciliacao_db.py`); os dois
+convivem — a lista para o painel destrinchar o motivo, o código para agrupar.
+
+`IssueCode` é `StrEnum`: cada membro **é** a sua string, então as comparações com
+literal que já existem (`"unit_mismatch" in codes`) seguem funcionando.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+__all__ = [
+    "IssueCode",
+    "MARCAS_REVISAO",
+    "VEREDITO_PRECO",
+]
+
+
+class IssueCode(StrEnum):
+    """Um código de divergência acumulado por uma linha ou nota conciliada.
+
+    Gravado em `fat_conciliacao(_item).issue_codes` (array de texto). Não há
+    CHECK no banco — array não aceita —, então este enum é o único guarda.
+    """
+
+    # --- fornecedor (nível da nota)
+    SUPPLIER_UNMAPPED = "supplier_unmapped"        # nome lido não casou com alias
+    SUPPLIER_FUZZY_MATCH = "supplier_fuzzy_match"  # casou por aproximação, conferir
+    SUPPLIER_ERP_ONLY = "supplier_erp_only"        # não-carne: comparação é a do ERP
+    NO_QUOTE_FOR_SUPPLIER = "no_quote_for_supplier"  # sem cotação no ciclo
+
+    # --- preço (nível da linha) — estes viram veredito
+    NO_QUOTE_FOR_ITEM = "no_quote_for_item"        # item da nota sem par na cotação
+    UNIT_MISMATCH = "unit_mismatch"                # preço por caixa x por libra
+    PRICE_ABOVE_QUOTE = "price_above_quote"        # faturado acima do cotado
+    PRICE_BELOW_QUOTE = "price_below_quote"        # faturado abaixo do cotado
+
+    # --- qualidade da leitura (nível da linha) — ligam `revisar`, não o veredito
+    LOW_VISION_CONFIDENCE = "low_vision_confidence"  # confiança da leitura abaixo do piso
+    HANDWRITTEN_PRESENT = "handwritten_present"      # há anotação à mão na linha
+
+    @property
+    def descricao(self) -> str:
+        return _DESCRICAO[self]
+
+
+_DESCRICAO: dict[IssueCode, str] = {
+    IssueCode.SUPPLIER_UNMAPPED: "Nome do fornecedor lido não casou com nenhum alias.",
+    IssueCode.SUPPLIER_FUZZY_MATCH: "Fornecedor casou por aproximação — conferir.",
+    IssueCode.SUPPLIER_ERP_ONLY: "Fornecedor não-carne: a comparação dele é contra o ERP.",
+    IssueCode.NO_QUOTE_FOR_SUPPLIER: "Fornecedor sem cotação no ciclo da nota.",
+    IssueCode.NO_QUOTE_FOR_ITEM: "Item da nota sem par no lado cotado.",
+    IssueCode.UNIT_MISMATCH: "Preço por caixa não compara com preço por libra.",
+    IssueCode.PRICE_ABOVE_QUOTE: "Faturado acima do cotado, além da tolerância.",
+    IssueCode.PRICE_BELOW_QUOTE: "Faturado abaixo do cotado, além da tolerância.",
+    IssueCode.LOW_VISION_CONFIDENCE: "Leitura do PDF abaixo do piso de confiança.",
+    IssueCode.HANDWRITTEN_PRESENT: "Linha com anotação à mão na nota.",
+}
+
+
+# Sinalizações de qualidade da leitura: não são veredito, mas ligam `revisar`.
+# Espelha o que estava hardcoded em conciliacao_db.py::_MARCAS_REVISAO.
+MARCAS_REVISAO: frozenset[str] = frozenset({
+    IssueCode.HANDWRITTEN_PRESENT,
+    IssueCode.LOW_VISION_CONFIDENCE,
+})
+
+# Códigos que produzem um veredito de preço (ordem de precedência fica no
+# _veredito de conciliacao_db.py). Aqui só para documentar o grupo.
+VEREDITO_PRECO: frozenset[str] = frozenset({
+    IssueCode.NO_QUOTE_FOR_ITEM,
+    IssueCode.UNIT_MISMATCH,
+    IssueCode.PRICE_ABOVE_QUOTE,
+    IssueCode.PRICE_BELOW_QUOTE,
+})

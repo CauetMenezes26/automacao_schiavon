@@ -1,0 +1,852 @@
+"""Navegação SharePoint via REST API e automação de browser com Playwright."""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Callable
+from urllib.parse import parse_qs, quote as urlquote, unquote, urlparse
+from playwright.sync_api import TimeoutError as PwTimeout
+
+# Step: nome de pasta (str) ou função que recebe a listagem e retorna a pasta
+Step = str | Callable[[list[dict]], dict | None]
+
+_PT_MES = {
+    1: "JAN", 2: "FEV", 3: "MAR", 4: "ABR",
+    5: "MAI", 6: "JUN", 7: "JUL", 8: "AGO",
+    9: "SET", 10: "OUT", 11: "NOV", 12: "DEZ",
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers de data / nome de pasta
+# ---------------------------------------------------------------------------
+
+def current_year_folder(reference: date | None = None) -> str:
+    """Retorna o ano da data de referência como string (ex: '2026'). Padrão: hoje."""
+    return str((reference or date.today()).year)
+
+
+def current_month_folder(reference: date | None = None) -> str:
+    """Retorna o nome da pasta do mês da data de referência (ex: '06 JUN - 2026'). Padrão: hoje."""
+    ref = reference or date.today()
+    return f"{ref.month:02d} {_PT_MES[ref.month]} - {ref.year}"
+
+
+def resolve_invoices_launch_folder(entries: list[dict]) -> dict | None:
+    """Procura por uma pasta de lançamento de invoices com variações de nome."""
+    target = "_invoices para lançamento"
+    normalized = target.lower().replace(" ", "")
+    for entry in entries:
+        if entry["type"] != "pasta":
+            continue
+        name = entry["name"].strip().lower().replace(" ", "")
+        if name == normalized or "invoicesparalancamento" in name or "invoices para lançamento" in name:
+            return entry
+    return None
+
+
+def resolve_month_folder(entries: list[dict], reference: date | None = None) -> dict | None:
+    """Procura o mês da data de referência em pastas com variações de formato. Padrão: hoje."""
+    ref = reference or date.today()
+    expected = current_month_folder(ref).lower()
+    for entry in entries:
+        if entry["type"] != "pasta":
+            continue
+        name = entry["name"].strip().lower()
+        if name == expected or f"{ref.month:02d}" in name and _PT_MES[ref.month].lower() in name:
+            return entry
+    return None
+
+
+def _match_week_folder(entries: list[dict], day: int) -> dict | None:
+    """Procura a pasta cuja faixa 'DD A DD' contém o dia informado."""
+    for entry in entries:
+        if entry["type"] != "pasta":
+            continue
+        name = entry["name"].strip()
+        m = re.match(r"^(\d{1,2})\s*[Aa-]\s*(\d{1,2})$", name)
+        if m and int(m.group(1)) <= day <= int(m.group(2)):
+            return entry
+    return None
+
+
+def resolve_week_folder(entries: list[dict], reference: date | None = None) -> dict | None:
+    """
+    Recebe a listagem de pastas e retorna aquela cuja faixa de dias
+    contém o dia da data de referência (padrão: hoje). Padrão de nome
+    de pasta: 'DD A DD' (ex: '15 A 21'). Também aceita variações como
+    '15 a 21' e '15-21'.
+
+    Se a pasta da semana de referência não for encontrada, tenta a pasta
+    de 7 dias antes como fallback.
+    """
+    ref = reference or date.today()
+    match = _match_week_folder(entries, ref.day)
+    if match:
+        return match
+
+    fallback_day = (ref - timedelta(days=7)).day
+    match = _match_week_folder(entries, fallback_day)
+    if match:
+        print(f"    ⚠ Semana do dia {ref.day} não encontrada, usando semana anterior: {match['name']}")
+    return match
+
+
+def build_nav_steps(reference: date | None = None) -> list[Step]:
+    """
+    Define o caminho de navegação dentro de cada SharePoint.
+    `reference` controla ano/mês/semana buscados (padrão: hoje).
+    Ajuste aqui quando a estrutura de pastas mudar.
+    """
+    ref = reference or date.today()
+    return [
+        "Invoices Fornecedores",
+        current_year_folder(ref),
+        resolve_invoices_launch_folder,
+        lambda entries: resolve_month_folder(entries, ref),
+        lambda entries: resolve_week_folder(entries, ref),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# SharePoint REST API
+# ---------------------------------------------------------------------------
+
+def parse_sharepoint_url(url: str) -> tuple[str, str | None]:
+    """
+    Extrai (site_url, folder_server_relative_path) de uma URL SharePoint
+    no formato AllItems.aspx?id=...
+    """
+    parsed = urlparse(url)
+    path_parts = [p for p in parsed.path.split("/") if p]
+    if len(path_parts) >= 2 and path_parts[0].lower() == "sites":
+        site_path = f"/sites/{path_parts[1]}"
+    else:
+        site_path = "/" + path_parts[0] if path_parts else "/"
+    site_url = f"{parsed.scheme}://{parsed.netloc}{site_path}"
+    qs = parse_qs(parsed.query)
+    id_param = qs.get("id", [None])[0]
+    return site_url, unquote(id_param) if id_param else None
+
+
+def _odata_escape(value: str) -> str:
+    """Dobra apóstrofo para caber num literal OData `'...'`.
+
+    Nome de fornecedor/arquivo com apóstrofo (ex.: "Kelly's Foods") fecha a
+    string no meio se o apóstrofo não for escapado — o SharePoint responde
+    "Url ausente ou inválida" em vez de um erro sobre aspas.
+    """
+    return value.replace("'", "''")
+
+
+def get_folder_contents(context, site_url: str, folder_path: str, base: str) -> list[dict]:
+    """
+    Chama a REST API do SharePoint e retorna pastas e arquivos de um caminho.
+    Usa a sessão autenticada do contexto Playwright.
+    """
+    api_url = (
+        f"{site_url}/_api/web"
+        f"/GetFolderByServerRelativePath(decodedurl=@p)"
+        f"?@p='{_odata_escape(folder_path)}'"
+        f"&$expand=Folders,Files"
+        f"&$select="
+        f"Folders/Name,Folders/ServerRelativeUrl,Folders/ItemCount,"
+        f"Files/Name,Files/ServerRelativeUrl,Files/Length,Files/TimeLastModified"
+    )
+    resp = context.request.get(api_url, headers={"Accept": "application/json;odata=verbose"})
+    if not resp.ok:
+        raise RuntimeError(f"Erro {resp.status} ao acessar '{folder_path}': {resp.text()[:300]}")
+
+    root = resp.json().get("d", {})
+    entries: list[dict] = []
+
+    for folder in root.get("Folders", {}).get("results", []):
+        if folder.get("Name") == "Forms":
+            continue
+        entries.append({
+            "name": folder["Name"],
+            "type": "pasta",
+            "item_count": folder.get("ItemCount"),
+            "web_url": base + folder["ServerRelativeUrl"],
+            "server_relative_url": folder["ServerRelativeUrl"],
+        })
+
+    for file in root.get("Files", {}).get("results", []):
+        entries.append({
+            "name": file["Name"],
+            "type": "arquivo",
+            "size_bytes": int(file.get("Length") or 0),
+            "last_modified": file.get("TimeLastModified"),
+            "web_url": base + file["ServerRelativeUrl"],
+            "server_relative_url": file["ServerRelativeUrl"],
+        })
+
+    return entries
+
+
+def navigate(context, site_url: str, base: str, root_path: str, steps: list[Step]) -> tuple[str, list[dict]]:
+    """
+    Percorre a hierarquia de pastas passo a passo.
+    Cada step pode ser str (nome exato, case-insensitive) ou callable(entries) → dict.
+    Retorna (caminho_final, listagem_final).
+    """
+    current_path = root_path
+    for step in steps:
+        entries = get_folder_contents(context, site_url, current_path, base)
+        if callable(step):
+            match = step(entries)
+            label = match["name"] if match else "(não encontrado)"
+        else:
+            label = step
+            match = next((e for e in entries if e["name"].lower() == step.lower()), None)
+
+        print(f"    → {label}")
+
+        if match is None:
+            available = ", ".join(e["name"] for e in entries) or "(vazio)"
+            raise RuntimeError(
+                f"Pasta '{label}' não encontrada em '{current_path}'.\n"
+                f"      Disponíveis: {available}"
+            )
+        current_path = match["server_relative_url"]
+
+    return current_path, get_folder_contents(context, site_url, current_path, base)
+
+
+# ---------------------------------------------------------------------------
+# Download e renomeação de arquivos
+# ---------------------------------------------------------------------------
+
+_PREFIX_MAP = {
+    "windermere": "wind",
+    "phillips":   "drphil",
+}
+
+
+def _get_prefix(record: dict) -> str:
+    """
+    Deriva o prefixo a partir da URL do config (mais confiável que o name).
+    A URL contém o nome do site SharePoint: Scanner-Windermere / Scanner-Dr.Phillips.
+    """
+    # Busca na URL e no name (case-insensitive)
+    search = " ".join([
+        (record.get("url") or ""),
+        (record.get("name") or ""),
+        (record.get("description") or ""),
+    ]).lower()
+
+    for keyword, prefix in _PREFIX_MAP.items():
+        if keyword in search:
+            return prefix
+
+    # Fallback: primeiros 4 chars do name sem hifens
+    return (record.get("name") or "file")[:4].lower().replace("-", "")
+
+
+def _build_filename(prefix: str, original_name: str) -> str:
+    """
+    Monta o nome do arquivo de destino.
+    Formato: {prefix}_{stem}_{dd-mm-yyyy}{extensão}
+    """
+    today = date.today()
+    p = Path(original_name)
+    return f"{prefix}_{p.stem}_{today.strftime('%d-%m-%Y')}{p.suffix}"
+
+
+def _already_downloaded(original_name: str, *search_dirs: Path) -> Path | None:
+    """
+    Verifica se o arquivo original do SharePoint já foi baixado anteriormente.
+    Busca pelo stem do nome original dentro dos diretórios informados.
+    Retorna o caminho encontrado ou None.
+    """
+    stem = Path(original_name).stem.lower()
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for existing in directory.iterdir():
+            if stem in existing.name.lower():
+                return existing
+    return None
+
+
+def download_files(
+    context,
+    entries: list[dict],
+    record: dict,
+    dest_dir: Path,
+    skip_dirs: list[Path] | None = None,
+) -> list[Path]:
+    """
+    Baixa todos os arquivos (type=='arquivo') listados em entries.
+    Renomeia com o prefixo do config e a data de hoje.
+
+    skip_dirs: pastas adicionais verificadas para evitar re-download
+               (ex: read_files/). Se o nome original já existir em qualquer
+               uma delas, o arquivo é ignorado.
+    """
+    prefix = _get_prefix(record)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    check_dirs = [dest_dir] + (skip_dirs or [])
+    downloaded: list[Path] = []
+
+    files_only = [e for e in entries if e["type"] == "arquivo"]
+    if not files_only:
+        print("  Nenhum arquivo para baixar.")
+        return downloaded
+
+    for entry in files_only:
+        original_name = entry["name"]
+
+        # Verifica se o arquivo já existe (pelo nome original do SharePoint)
+        existing = _already_downloaded(original_name, *check_dirs)
+        if existing:
+            print(f"  ✓ já existe: {original_name}  →  {existing.name}  (ignorado)")
+            continue
+
+        dest_name = _build_filename(prefix, original_name)
+        dest_path = dest_dir / dest_name
+        print(f"  Baixando : {original_name}  →  {dest_name}")
+
+        parsed = urlparse(entry["web_url"])
+        path_parts = [p for p in parsed.path.split("/") if p]
+        site_url = f"{parsed.scheme}://{parsed.netloc}/sites/{path_parts[1]}"
+        download_url = (
+            f"{site_url}/_api/web"
+            f"/GetFileByServerRelativePath(decodedurl=@p)/$value"
+            f"?@p='{_odata_escape(entry['server_relative_url'])}'"
+        )
+
+        try:
+            resp = context.request.get(download_url)
+            content_type = resp.headers.get("content-type", "")
+            if resp.ok and "text/html" not in content_type:
+                dest_path.write_bytes(resp.body())
+                downloaded.append(dest_path)
+                size_kb = dest_path.stat().st_size / 1024
+                print(f"  ✓ {size_kb:.1f} KB")
+            else:
+                print(f"  ✗ status={resp.status}  content-type={content_type[:80]}")
+        except Exception as exc:
+            print(f"  ✗ Falha: {exc}")
+
+    return downloaded
+
+
+# ---------------------------------------------------------------------------
+# Browser Playwright
+# ---------------------------------------------------------------------------
+
+class SharePointLoginError(RuntimeError):
+    """Falha de autenticação no portal Microsoft (credencial, MFA, bloqueio).
+
+    Distinta de erro de navegação (pasta não encontrada): quem trata separa as
+    duas para gravar `ERRO_LOGIN` e alertar a operação sobre QUAL sistema caiu.
+    """
+
+
+def _handle_microsoft_login(page, username: str, password: str) -> None:
+    """Preenche o login Microsoft se a página redirecionar para o portal de auth."""
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    if "login.microsoftonline.com" not in page.url:
+        return
+
+    print("  [login] Autenticando no Microsoft...")
+    try:
+        page.wait_for_selector('input[name="loginfmt"]', timeout=15_000)
+        page.fill('input[name="loginfmt"]', username)
+        page.keyboard.press("Enter")
+
+        page.wait_for_selector('input[name="passwd"]', timeout=15_000)
+        page.fill('input[name="passwd"]', password)
+        page.click('input[type="submit"]')
+
+        page.wait_for_selector(
+            '#usernameError, #passwordError, #idBtn_Back, input[name="loginfmt"]',
+            timeout=30_00,
+        )
+
+    except PwTimeout as exc:
+        _debug_dump(page, "timeout_pos_submit")
+        raise SharePointLoginError(
+            f"portal de login não respondeu como esperado: {exc}") from exc
+
+    for sel in ("#usernameError", "#passwordError"):
+        el = page.query_selector(sel)
+        if el and el.is_visible():
+            raise SharePointLoginError(f"login recusado: {el.inner_text()[:200]}")
+
+    _dismiss_kmsi_prompt(page)
+
+    if "login.microsoftonline.com" in page.url:
+        try:
+            page.wait_for_url(
+                lambda url: "login.microsoftonline.com" not in url,
+                timeout=15_000,
+            )
+        except PwTimeout as exc:
+            _debug_dump(page, "timeout_pos_kmsi")
+            raise SharePointLoginError(
+                f"ainda no portal de login após submeter as credenciais "
+                f"(url atual: {page.url})"
+            ) from exc
+
+    print("  [login] Concluído.")
+
+
+def _dismiss_kmsi_prompt(page) -> None:
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    try:
+        btn = page.locator('xpath=//input[@id="idBtn_Back"]')
+        btn.wait_for(state="visible", timeout=12_000)
+        btn.click()
+        page.wait_for_url(
+            lambda url: "login.microsoftonline.com" not in url,
+            timeout=15_000,
+        )
+    except PwTimeout:
+        _debug_dump(page, "timeout_kmsi_dismiss")
+
+
+def _debug_dump(page, tag: str) -> None:
+    """Salva screenshot + url + html no momento da falha, pra diagnóstico."""
+    import time
+    ts = int(time.time())
+    try:
+        page.screenshot(path=f"debug_{tag}_{ts}.png", full_page=True)
+        with open(f"debug_{tag}_{ts}.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        print(f"  [debug] url no momento da falha: {page.url}")
+        print(f"  [debug] screenshot salvo em debug_{tag}_{ts}.png")
+    except Exception as e:
+        print(f"  [debug] falhou ao salvar dump: {e}")
+
+
+def _navigate_browser_to(page, base: str, final_path: str) -> None:
+    """Navega o browser visualmente até a pasta final no SharePoint."""
+    path_parts = [p for p in final_path.split("/") if p]
+    library_root = "/" + "/".join(path_parts[:3])
+    url = f"{base}{library_root}/Forms/AllItems.aspx?id={urlquote(final_path)}"
+    page.goto(url, wait_until="networkidle", timeout=30_000)
+
+
+def _process_record(
+    context,
+    page,
+    record: dict,
+    nav_steps: list[Step],
+    credentials: tuple[str, str],
+    dest_dir: Path | None = None,
+    skip_dirs: list[Path] | None = None,
+) -> tuple[str | None, list[dict], list[Path]]:
+    """
+    Dentro de uma sessão de browser já aberta, acessa a URL do registro,
+    faz login se necessário, navega até a pasta alvo e baixa os arquivos.
+    """
+    url = record.get("url")
+    if not url:
+        raise RuntimeError("URL não configurada no registro.")
+
+    site_url, root_folder_path = parse_sharepoint_url(url)
+    parsed = urlparse(url)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+
+    if not root_folder_path:
+        raise RuntimeError("Não foi possível extrair o caminho da pasta da URL.")
+
+    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    _handle_microsoft_login(page, *credentials)
+    page.wait_for_url(f"**{parsed.netloc}**", timeout=30_000)
+    page.wait_for_load_state("networkidle", timeout=30_000)
+
+    print(f"  Raiz: {root_folder_path}")
+    final_path, entries = navigate(context, site_url, base, root_folder_path, nav_steps)
+    _navigate_browser_to(page, base, final_path)
+
+    downloaded: list[Path] = []
+    if dest_dir is not None:
+        print(f"\n  Download → {dest_dir}")
+        downloaded = download_files(context, entries, record, dest_dir, skip_dirs=skip_dirs)
+
+    return final_path, entries, downloaded
+
+
+# ---------------------------------------------------------------------------
+# Upload de arquivos para SharePoint
+# ---------------------------------------------------------------------------
+
+def _get_form_digest(context, site_url: str) -> str:
+    """Obtém o X-RequestDigest necessário para operações POST no SharePoint."""
+    resp = context.request.post(
+        f"{site_url}/_api/contextinfo",
+        headers={"Accept": "application/json;odata=verbose"},
+    )
+    if not resp.ok:
+        raise RuntimeError(f"Erro {resp.status} ao obter FormDigest: {resp.text()[:300]}")
+    return resp.json()["d"]["GetContextWebInformation"]["FormDigestValue"]
+
+
+def create_file_sharing_link(
+    context, site_url: str, server_relative_url: str, can_edit: bool = True,
+) -> dict:
+    """
+    Cria um link de compartilhamento anônimo restrito a ESTE arquivo — quem
+    abre não enxerga a pasta nem os arquivos de outros fornecedores. Sem
+    isso, o link mandado ao fornecedor caía no atalho de pasta (`:f:`) usado
+    como fallback em `commons/messaging/messenger.py`.
+
+    `can_edit=True` porque o fornecedor precisa preencher a coluna de preço
+    na planilha; `can_edit=False` gera link só de leitura.
+
+    `linkKind` vem do enum CSOM `SharingLinkKind` (Uninitialized=0, Direct=1,
+    OrganizationView=2, OrganizationEdit=3, AnonymousView=4, AnonymousEdit=5,
+    Flexible=6). Sem `role` explícito — não é exigido pelo endpoint e varia
+    entre versões da API; melhor não chutar. Confira o link retornado na
+    primeira execução real (deve abrir só o arquivo, com "Qualquer pessoa com
+    o link pode editar").
+    """
+    digest = _get_form_digest(context, site_url)
+    api_url = (
+        f"{site_url}/_api/web"
+        f"/GetFileByServerRelativePath(decodedurl=@p)"
+        f"/ListItemAllFields/ShareLink"
+        f"?@p='{_odata_escape(server_relative_url)}'"
+    )
+    body = {
+        "request": {
+            "createLink": True,
+            "settings": {
+                "allowAnonymousAccess": True,
+                "linkKind": 5 if can_edit else 4,
+                "restrictShareMembership": False,
+                "expiration": None,
+            },
+        },
+    }
+    resp = context.request.post(
+        api_url,
+        headers={
+            "Accept": "application/json;odata=verbose",
+            "Content-Type": "application/json;odata=verbose",
+            "X-RequestDigest": digest,
+        },
+        data=json.dumps(body),
+    )
+    if not resp.ok:
+        raise RuntimeError(
+            f"Erro {resp.status} ao criar link de compartilhamento de "
+            f"'{server_relative_url}': {resp.text()[:300]}"
+        )
+
+    info = resp.json().get("d", {}).get("ShareLink", {}).get("sharingLinkInfo", {})
+    url = (info.get("Url") or {}).get("Value")
+    if not url:
+        raise RuntimeError(
+            f"Resposta de ShareLink sem Url para '{server_relative_url}': "
+            f"{resp.text()[:300]}"
+        )
+    print(f"  ✓ Link de compartilhamento (anônimo, "
+          f"{'edição' if can_edit else 'leitura'}): {url}")
+    return {"url": url, "raw": info}
+
+
+def ensure_folder_exists(context, site_url: str, folder_path: str) -> None:
+    """
+    Cria a hierarquia de pastas no SharePoint se não existir.
+    folder_path: caminho server-relative completo (ex: '/sites/X/Shared Documents/Cotacoes/2026')
+    """
+    digest = _get_form_digest(context, site_url)
+
+    site_path = urlparse(site_url).path.rstrip("/")
+    parts = [p for p in folder_path.split("/") if p]
+    site_parts = [p for p in site_path.split("/") if p]
+    start = len(site_parts) + 1
+
+    for i in range(start + 1, len(parts) + 1):
+        partial = "/" + "/".join(parts[:i])
+        check_url = (
+            f"{site_url}/_api/web"
+            f"/GetFolderByServerRelativePath(decodedurl=@p)"
+            f"?@p='{_odata_escape(partial)}'"
+        )
+        resp = context.request.get(check_url, headers={"Accept": "application/json;odata=verbose"})
+        if resp.ok:
+            continue
+
+        create_url = f"{site_url}/_api/web/folders"
+        resp = context.request.post(
+            create_url,
+            headers={
+                "Accept": "application/json;odata=verbose",
+                "Content-Type": "application/json;odata=verbose",
+                "X-RequestDigest": digest,
+            },
+            data=f'{{"__metadata": {{"type": "SP.Folder"}}, "ServerRelativeUrl": "{partial}"}}',
+        )
+        if resp.ok:
+            print(f"  ✓ Pasta criada: {partial}")
+        elif resp.status != 500:
+            raise RuntimeError(f"Erro {resp.status} ao criar pasta '{partial}': {resp.text()[:300]}")
+
+
+_LOCK_OWNER_RE = re.compile(r"bloqueado para uso compartilhado por ([^\[]+)", re.IGNORECASE)
+
+# Tentativas de upload quando o arquivo está travado (423) por sessão do Office.
+UPLOAD_LOCK_RETRIES = 4
+UPLOAD_LOCK_WAIT_SECONDS = 30
+
+
+def _lock_owner(body: str) -> str | None:
+    """Extrai o e-mail/nome de quem está segurando o lock, se a mensagem informar."""
+    match = _LOCK_OWNER_RE.search(body)
+    return match.group(1).strip() if match else None
+
+
+def upload_file_to_sharepoint(
+    context,
+    site_url: str,
+    folder_path: str,
+    file_path: Path,
+    overwrite: bool = True,
+) -> dict:
+    """
+    Faz upload de um arquivo para uma pasta no SharePoint via REST API.
+
+    Se o arquivo estiver aberto no Excel (lock de coautoria), o SharePoint responde
+    423 — nesse caso tenta novamente algumas vezes antes de desistir.
+
+    Retorna dict com:
+      - server_relative_url: caminho do arquivo no SharePoint
+      - file_name: nome do arquivo
+    """
+    file_bytes = file_path.read_bytes()
+    file_name = file_path.name
+
+    ow = "true" if overwrite else "false"
+    upload_url = (
+        f"{site_url}/_api/web"
+        f"/GetFolderByServerRelativePath(decodedurl=@p)"
+        f"/Files/add(url=@f,overwrite={ow})"
+        f"?@p='{_odata_escape(folder_path)}'"
+        f"&@f='{urlquote(_odata_escape(file_name))}'"
+    )
+
+    resp = None
+    for attempt in range(1, UPLOAD_LOCK_RETRIES + 1):
+        digest = _get_form_digest(context, site_url)
+        resp = context.request.post(
+            upload_url,
+            headers={
+                "Accept": "application/json;odata=verbose",
+                "X-RequestDigest": digest,
+                "Content-Length": str(len(file_bytes)),
+            },
+            data=file_bytes,
+        )
+        if resp.ok or resp.status != 423:
+            break
+
+        owner = _lock_owner(resp.text()) or "outro usuário"
+        if attempt < UPLOAD_LOCK_RETRIES:
+            print(
+                f"  ⚠ '{file_name}' travado por {owner}. "
+                f"Nova tentativa em {UPLOAD_LOCK_WAIT_SECONDS}s "
+                f"({attempt}/{UPLOAD_LOCK_RETRIES - 1})."
+            )
+            time.sleep(UPLOAD_LOCK_WAIT_SECONDS)
+
+    if not resp.ok:
+        if resp.status == 423:
+            owner = _lock_owner(resp.text()) or "outro usuário"
+            raise RuntimeError(
+                f"'{file_name}' está aberto no Excel por {owner} e o SharePoint "
+                f"não libera a gravação. Feche o arquivo (Excel desktop e Excel Online) "
+                f"e rode o fluxo de novo."
+            )
+        raise RuntimeError(
+            f"Erro {resp.status} no upload de '{file_name}' para '{folder_path}': "
+            f"{resp.text()[:300]}"
+        )
+
+    result_data = resp.json().get("d", {})
+    server_relative_url = result_data.get("ServerRelativeUrl", f"{folder_path}/{file_name}")
+
+    print(f"  ✓ Upload: {file_name} → {server_relative_url}")
+    return {
+        "server_relative_url": server_relative_url,
+        "file_name": file_name,
+    }
+
+
+def get_file_sharing_url(context, site_url: str, server_relative_url: str) -> str | None:
+    """
+    Obtém a URL de compartilhamento (LinkingUri) de um arquivo no SharePoint.
+    Retorna a URL completa ou None se não disponível.
+    """
+    api_url = (
+        f"{site_url}/_api/web"
+        f"/GetFileByServerRelativePath(decodedurl=@p)"
+        f"?@p='{_odata_escape(server_relative_url)}'"
+        f"&$select=LinkingUri"
+    )
+    try:
+        resp = context.request.get(api_url, headers={"Accept": "application/json;odata=verbose"})
+        if resp.ok:
+            linking_uri = resp.json().get("d", {}).get("LinkingUri")
+            if linking_uri:
+                print(f"  ✓ Link de compartilhamento: {linking_uri}")
+                return linking_uri
+    except Exception as exc:
+        print(f"  ⚠ Erro ao obter link de compartilhamento: {exc}")
+    return None
+
+
+def download_single_file(context, site_url: str, server_relative_url: str, dest_path: Path) -> Path:
+    """Baixa um arquivo específico do SharePoint pelo caminho server-relative."""
+    download_url = (
+        f"{site_url}/_api/web"
+        f"/GetFileByServerRelativePath(decodedurl=@p)/$value"
+        f"?@p='{_odata_escape(server_relative_url)}'"
+    )
+    resp = context.request.get(download_url)
+    if not resp.ok:
+        raise RuntimeError(
+            f"Erro {resp.status} ao baixar '{server_relative_url}': {resp.text()[:300]}"
+        )
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(resp.body())
+    size_kb = dest_path.stat().st_size / 1024
+    print(f"  ✓ Download: {dest_path.name} ({size_kb:.1f} KB)")
+    return dest_path
+
+
+def get_file_metadata(context, site_url: str, server_relative_url: str) -> dict:
+    """Retorna metadados de um arquivo no SharePoint (Name, TimeLastModified, Length, etc)."""
+    api_url = (
+        f"{site_url}/_api/web"
+        f"/GetFileByServerRelativePath(decodedurl=@p)"
+        f"?@p='{_odata_escape(server_relative_url)}'"
+    )
+    resp = context.request.get(api_url, headers={"Accept": "application/json;odata=verbose"})
+    if not resp.ok:
+        raise RuntimeError(
+            f"Erro {resp.status} ao obter metadados de '{server_relative_url}': "
+            f"{resp.text()[:300]}"
+        )
+    return resp.json().get("d", {})
+
+
+def open_sharepoint_session(username: str, password: str, site_url: str, headless: bool = True):
+    """
+    Abre uma sessão Playwright autenticada no SharePoint.
+    Retorna (playwright, browser, context, page) — o chamador deve fechar com browser.close().
+    """
+    from playwright.sync_api import sync_playwright
+
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(headless=headless)
+    context = browser.new_context()
+    page = context.new_page()
+
+    page.goto(site_url, wait_until="domcontentloaded", timeout=60_000)
+    _handle_microsoft_login(page, username, password)
+
+    parsed = urlparse(site_url)
+    if parsed.netloc not in page.url:
+        page.wait_for_url(f"**{parsed.netloc}**", timeout=60_000)
+    page.wait_for_load_state("load", timeout=60_000)
+    print("  [login] Sessão SharePoint aberta.")
+
+    return pw, browser, context, page
+
+
+def process_all_configs(
+    records: list[dict],
+    username: str,
+    password: str,
+    nav_steps: list[Step],
+    headless: bool = False,
+    keep_open: bool = False,
+    download_dir: Path | None = None,
+    skip_dirs: list[Path] | None = None,
+    on_record_done: Callable[[dict], None] | None = None,
+) -> list[dict]:
+    """
+    Abre o Chromium UMA VEZ, faz login e processa cada config em sequência.
+    Retorna lista de dicionários com record, status, final_path e entries.
+    """
+    from playwright.sync_api import sync_playwright
+
+    credentials = (username, password)
+    results = []
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context()
+        page = context.new_page()
+
+        for record in records:
+            print(f"\n{'='*60}")
+            print(f"[{record['id']}] {record['name']}")
+            print(f"    {record.get('description') or ''}")
+            print(f"{'='*60}")
+
+            status = False
+            final_path: str | None = None
+            entries: list[dict] = []
+
+            downloaded: list[Path] = []
+            error_msg: str | None = None
+            error_tipo: str | None = None
+            try:
+                final_path, entries, downloaded = _process_record(
+                    context, page, record, nav_steps, credentials,
+                    dest_dir=download_dir, skip_dirs=skip_dirs,
+                )
+                status = True
+                print(f"\n  Pasta final : {final_path}")
+                print(f"  Itens encontrados: {len(entries)}")
+                for e in entries:
+                    if e["type"] == "pasta":
+                        print(f"    [pasta  ] {e['name']}  ({e.get('item_count', '?')} itens)")
+                    else:
+                        size = f"  {e['size_bytes']:,} B" if e.get("size_bytes") else ""
+                        mod = f"  [{e['last_modified'][:10]}]" if e.get("last_modified") else ""
+                        print(f"    [arquivo] {e['name']}{size}{mod}")
+                if downloaded:
+                    print(f"\n  {len(downloaded)} arquivo(s) baixado(s).")
+            except SharePointLoginError as exc:
+                error_msg = str(exc)
+                error_tipo = "login"
+                print(f"\n  ERRO DE LOGIN: {error_msg}")
+            except Exception as exc:
+                error_msg = str(exc)
+                error_tipo = "navegacao"
+                print(f"\n  ERRO: {error_msg}")
+
+            result = {
+                "record": record,
+                "status": status,
+                "final_path": final_path,
+                "error": error_msg,
+                "error_tipo": error_tipo,
+                "entries": entries,
+                "downloaded": [str(p) for p in downloaded],
+            }
+            results.append(result)
+
+            # Salva no banco imediatamente, antes do browser fechar
+            if on_record_done:
+                on_record_done(result)
+
+        if keep_open:
+            input("\nBrowser aberto. Pressione Enter para fechar...")
+        browser.close()
+
+    return results

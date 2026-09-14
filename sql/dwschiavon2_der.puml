@@ -1,0 +1,234 @@
+@startuml dwschiavon2_DER
+' =============================================================================
+' DER — dwschiavon2 (fisico)
+' Coluna unica, na ordem em que as tabelas sao preenchidas.
+'
+' As setas mostram a cadeia de posse (pai -> filho). As FKs para dimensao
+' aparecem como texto na propria coluna (--> tabela), porque desenha-las
+' cruzava o diagrama inteiro e era o que o tornava ilegivel.
+'
+'   PK  chave primaria    UK  chave unica    *  NOT NULL
+' =============================================================================
+
+title Estrutura das tabelas — dwschiavon2
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName "Consolas"
+skinparam defaultFontSize 12
+skinparam linetype ortho
+skinparam nodesep 25
+skinparam ranksep 30
+skinparam ArrowColor #5B6058
+skinparam class {
+  BorderColor #5B6058
+  FontColor #1F2421
+}
+hide circle
+hide methods
+
+' ============================================================ 0. CADASTRO
+entity "**dim_loja**" as loja #F6EDDD {
+  **id** : smallserial <<PK>>
+  --
+  * codigo : varchar(30) <<UK>>
+  * nome : varchar(80)
+  * ativo : boolean
+}
+
+entity "**dim_fonte**" as fonte #F6EDDD {
+  **id** : smallserial <<PK>>
+  --
+  * id_loja --> dim_loja
+  * ferramenta : varchar(30)
+  * url : text
+  * ativo : boolean
+  --
+  UK (id_loja, ferramenta)
+}
+
+entity "**dim_fornecedor**" as forn #F6EDDD {
+  **id** : serial <<PK>>
+  --
+  * nome : varchar(120) <<UK>>
+  contato / email / whatsapp
+  * canal : varchar(10)
+  * cotado : boolean
+  planilha_url : text
+  notas : text
+  * ativo : boolean
+}
+
+entity "**dim_fornecedor_alias**" as alias #F6EDDD {
+  **id** : serial <<PK>>
+  --
+  * id_fornecedor --> dim_fornecedor
+  * alias : varchar(200)
+  * alias_norm : varchar(200)
+  * origem : varchar(10)
+  * ativo : boolean
+  --
+  UK (alias_norm, origem)
+}
+
+' ======================================================= 1. ORQUESTRACAO
+entity "**processo**" as proc #E6F0EA {
+  **id** : bigserial <<PK>>
+  --
+  * cod_tipo : varchar(10)
+  <i>invoice | cotacao | coleta</i>
+  * chave_natural : varchar(200)
+  id_loja --> dim_loja
+  referencia : date
+  --
+  cod_etapa : smallint <i>chave</i>
+  etapa_exec : varchar(24) <i>valor</i>
+  * cod_status : smallint <i>chave</i>
+  * status_exec : varchar(24) <i>valor</i>
+  * percent_exec : smallint <i>0..100</i>
+  * tentativas : smallint
+  mensagem : text
+  custo_usd : numeric(10,6)
+  --
+  UK (cod_tipo, chave_natural)
+}
+
+' =========================================================== 2. COTACAO
+entity "**dim_ciclo**" as ciclo #FFF8E8 {
+  **id** : serial <<PK>>
+  --
+  id_processo --> processo <<UK>>
+  * semana_label : varchar(20) <<UK>>
+  * inicio : date
+  * fim : date
+  * aberto : boolean
+}
+
+entity "**fat_cotacao_envio**" as envio #FFF8E8 {
+  **id** : serial <<PK>>
+  --
+  * id_ciclo --> dim_ciclo
+  * id_fornecedor --> dim_fornecedor
+  arquivo / arquivo_path
+  aba : varchar(40)
+  coluna_idx : smallint
+  data_cotacao : date
+  enviado_em / canal / message_sid
+  respondido_em / importado_em
+  * ausente : boolean
+  --
+  UK (id_ciclo, id_fornecedor)
+}
+
+entity "**fat_cotacao_cobranca**" as cobr #FFF8E8 {
+  **id** : serial <<PK>>
+  --
+  * id_envio --> fat_cotacao_envio
+  * enviado_em : timestamp
+  * canal : varchar(10)
+  message_sid / observacao
+}
+
+entity "**fat_cotacao_preco**" as preco #FFF8E8 {
+  **id** : serial <<PK>>
+  --
+  * id_ciclo --> dim_ciclo
+  * id_fornecedor --> dim_fornecedor
+  * item_nome : varchar(255)
+  item_codigo : varchar(20) <i>informativo</i>
+  * preco : numeric(14,4) <i>0 = nao cotado</i>
+  preco_raw : varchar(100)
+  comentario : text
+}
+
+' ============================================================== 3. NOTA
+entity "**fat_invoice**" as nota #EDF3F7 {
+  **id** : serial <<PK>>
+  --
+  * id_processo --> processo <<UK>>
+  * id_loja --> dim_loja
+  id_fornecedor --> dim_fornecedor
+  fornecedor_lido : varchar(200)
+  numero : varchar(80)
+  emissao / vencimento : date
+  subtotal / imposto / total
+  * arquivo : varchar(200)
+  confianca : numeric(5,2)
+  modelo_ia / custo_usd
+  --
+  UK (id_loja, numero, fornecedor_lido)
+}
+
+entity "**fat_invoice_item**" as linha #EDF3F7 {
+  **id** : serial <<PK>>
+  --
+  * id_invoice --> fat_invoice
+  ordem : smallint
+  descricao : varchar(500)
+  * tipo_linha : varchar(10)
+  <i>item | encargo | ajuste</i>
+  qtd / unidade / preco_unit
+  valor_linha : numeric(14,2)
+  anotacao_manual : text
+}
+
+' ======================================================= 4. CONCILIACAO
+entity "**fat_conciliacao**" as conc #F7E9E5 {
+  **id** : serial <<PK>>
+  --
+  * id_invoice --> fat_invoice
+  id_ciclo --> dim_ciclo
+  * id_loja --> dim_loja
+  id_fornecedor --> dim_fornecedor
+  * comparacao : varchar(10)
+  <i>cotacao | erp</i>
+  * cod_status : smallint <i>chave</i>
+  * status_conc : varchar(24) <i>valor</i>
+  * revisar : boolean
+  --
+  UK (id_invoice, comparacao)
+}
+
+entity "**fat_conciliacao_item**" as citem #F7E9E5 {
+  **id** : serial <<PK>>
+  --
+  * id_conciliacao --> fat_conciliacao
+  * id_invoice_item --> fat_invoice_item
+  id_cotacao_preco --> fat_cotacao_preco
+  descricao_invoice / item_referencia
+  match_nivel : varchar(20)
+  match_score : numeric(6,2)
+  qtd : numeric(14,4)
+  preco_invoice : numeric(14,4)
+  preco_referencia : numeric(14,4)
+  dif_unitaria : numeric(14,4)
+  dif_pct : numeric(9,4)
+  **dif_valor** : numeric(14,2)
+  * cod_status : smallint <i>chave</i>
+  * status_conc : varchar(24) <i>valor</i>
+  * revisar : boolean
+  --
+  UK (id_conciliacao, id_invoice_item)
+}
+
+' ================================================ cadeia de posse, de cima
+' para baixo. Uma seta so por par, para a coluna nao alargar.
+loja  ||-down-|{ fonte
+fonte -[hidden]down- forn
+forn  ||-down-o{ alias
+alias -[hidden]down- proc
+
+proc  ||-down-o| ciclo
+ciclo ||-down-|{ envio
+envio ||-down-o{ cobr
+cobr  -[hidden]down- preco
+preco -[hidden]down- nota
+
+proc  ||-down-o| nota
+nota  ||-down-|{ linha
+linha -[hidden]down- conc
+
+nota  ||-down-o| conc
+conc  ||-down-|{ citem
+
+@enduml
