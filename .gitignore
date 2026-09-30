@@ -17,13 +17,12 @@ files/
 *.pdf
 *.xlsx
 
-# Configuracao local do Claude Code fica de fora, menos as rules do projeto:
-# a rule-mae da governanca acompanha o repo, e nao vale so na maquina de quem
-# escreveu. O `**` e necessario porque `*.md` acima ja pegaria os arquivos
-# dentro da pasta — a negacao vem depois, e a ultima regra que casa vence.
-.claude/*
-!.claude/rules/
-!.claude/rules/**
+# Configuracao local do Claude Code (inclui .claude/rules): fica so na maquina.
+.claude/
+
+# Dashboards do Grafana e planilhas/CSV avulsos: fora do repo.
+grafana/
+*.csv
 
 # Segredos e credenciais — profile local e chaves de OAuth.
 resources/.env
