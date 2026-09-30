@@ -1,16 +1,9 @@
-"""RPA Schiavon — entrypoint.
-
-`python main.py` roda o pipeline completo, uma passada. A orquestração (ordem
-dos fluxos, isolamento de falha, RESUMO, heartbeat) mora em
-`crawler/controller.py`; aqui só o contorno de processo.
-"""
-
 from __future__ import annotations
-
-import sys
-import traceback
-
 from crawler.controller import executar
+from commons.logging_config import get_logger
+import sys
+
+log = get_logger(__name__)
 
 if __name__ == "__main__":
     try:
@@ -18,5 +11,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception:
-        traceback.print_exc()
+        log.exception("execucao abortada antes dos fluxos")
         sys.exit(1)

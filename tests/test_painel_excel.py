@@ -111,7 +111,7 @@ def test_aba_divergencia_lista_preco_fora_da_tolerancia():
             {"arquivo": "wind_USFOODS_02-09.pdf", "fornecedor": "US Foods",
              "item": "Peito de Frango", "item_cotado": "CHICKEN BREAST",
              "qtd": 10, "preco_invoice": 12.80, "preco_referencia": 12.20,
-             "dif_unitaria": 0.60, "dif_pct": 4.9, "dif_valor": 6.00, "cod_status": 10},
+             "dif_unitaria": 0.60, "dif_pct": 4.9, "dif_valor": 6.00, "cod_status": 12},
         ]),
         caminho, _GERADO_EM, _INICIO, _FIM,
     )
@@ -120,11 +120,11 @@ def test_aba_divergencia_lista_preco_fora_da_tolerancia():
     assert "CHICKEN BREAST" in valores
     assert 0.60 in valores
     assert 6.00 in valores
-    assert "Acima do cotado" in valores
+    assert "Divergente do PO" in valores
 
 
 def test_aba_divergencia_inclui_item_sem_comparacao():
-    """Item sem par na cotacao entra na aba de divergencia com preco cotado
+    """Item sem par no PO entra na aba de divergencia com preco de referencia
     vazio — e o motivo diz por que nao deu para comparar."""
     caminho = Path(tempfile.mkdtemp()) / "painel_operacao.xlsx"
     gerar_relatorio(
@@ -140,8 +140,8 @@ def test_aba_divergencia_inclui_item_sem_comparacao():
     ws = openpyxl.load_workbook(caminho)[ABA_DIVERGENCIA]
     valores = _celulas(ws)
     assert "Molho Especial" in valores
-    assert "Item nao achado na cotacao" in valores
-    assert ws.cell(row=6, column=7).value is None  # preco cotado vazio
+    assert "Item nao achado no PO" in valores
+    assert ws.cell(row=6, column=7).value is None  # preco de referencia vazio
 
 
 def test_aba_divergencia_fecha_com_contagem_e_soma():
@@ -150,10 +150,10 @@ def test_aba_divergencia_fecha_com_contagem_e_soma():
         _dados_fake(divergencias=[
             {"arquivo": "a.pdf", "fornecedor": "US Foods", "item": "X", "item_cotado": "X",
              "qtd": 10, "preco_invoice": 12.80, "preco_referencia": 12.20,
-             "dif_unitaria": 0.60, "dif_pct": 4.9, "dif_valor": 6.00, "cod_status": 10},
+             "dif_unitaria": 0.60, "dif_pct": 4.9, "dif_valor": 6.00, "cod_status": 12},
             {"arquivo": "b.pdf", "fornecedor": "Sysco", "item": "Y", "item_cotado": "Y",
              "qtd": 3, "preco_invoice": 5.00, "preco_referencia": 5.50,
-             "dif_unitaria": -0.50, "dif_pct": -9.1, "dif_valor": -1.50, "cod_status": 11},
+             "dif_unitaria": -0.50, "dif_pct": -9.1, "dif_valor": -1.50, "cod_status": 12},
         ]),
         caminho, _GERADO_EM, _INICIO, _FIM,
     )

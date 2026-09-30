@@ -20,9 +20,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.connection import connect_db, load_env  # noqa: E402
+from commons.db import connect_db  # noqa: E402
+from domain.config import carregar_config  # noqa: E402
 
-from utils.paths import ENV_PATH  # noqa: E402
 
 # Fornecedores de carne identificados nas invoices já lidas (invoice_header).
 FORNECEDORES = [
@@ -71,7 +71,7 @@ def main() -> None:
                         help="Grava no banco. Sem a flag, so mostra o que faria.")
     args = parser.parse_args()
 
-    conn = connect_db(load_env(ENV_PATH))
+    conn = connect_db(carregar_config().banco)
     try:
         print(f"\n{'='*60}")
         print("Cadastro de fornecedores de carne"

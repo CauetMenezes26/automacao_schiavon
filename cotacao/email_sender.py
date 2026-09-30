@@ -1,18 +1,18 @@
 """E-mail de cotação ao fornecedor.
 
-Monta o corpo HTML da cotação semanal; o transporte SMTP fica em `utils/email.py`
-(compartilhado com os alertas à operação e alimentado pelo `env` do projeto).
+Monta o corpo HTML da cotação semanal; o transporte SMTP fica em `commons/email_client.py`
+(compartilhado com os alertas à operação; recebe o `ConfigSmtp` do projeto).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from utils.email import enviar_email
+from commons.email_client import ConfigSmtp, enviar_email
 
 
 def send_quotation_email(
-    env: dict,
+    smtp: ConfigSmtp,
     recipient_email: str,
     supplier_name: str,
     sharepoint_url: str,
@@ -20,8 +20,8 @@ def send_quotation_email(
 ) -> dict:
     """Envia o e-mail com o link da cotação semanal.
 
-    Retorna o dict de log de `utils.email.enviar_email` (`status` = 'sent' |
-    'error'). Levanta `EnvironmentError` se o SMTP não estiver configurado.
+    Retorna o dict de log de `commons.email_client.enviar_email` (`status` = 'sent' |
+    'error'). Levanta `ConfigException` se o SMTP não estiver configurado.
     """
     formatted_date = datetime.now().strftime("%d/%m/%Y")
     subject = f"Cotação Semanal de Carnes - {week_label} - DataGuvi"
@@ -68,4 +68,4 @@ def send_quotation_email(
         f"DataGuvi — Enviado em {formatted_date}"
     )
 
-    return enviar_email(env, recipient_email, subject, html_body, text_body)
+    return enviar_email(smtp, recipient_email, subject, html_body, text_body)

@@ -1,15 +1,20 @@
 """Envio de notificações de cotação via WhatsApp (Twilio Content API)."""
 
-import os
 import json
 from datetime import datetime
-from .twilio_config import Twilio
+
+from commons.exception import ConfigException
+
+from .twilio_config import ConfigTwilio, Twilio
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
-def _validate_twilio_env_vars() -> tuple[str, str]:
-    """Valida e retorna as variáveis de ambiente obrigatórias do Twilio."""
-    sender_number = os.getenv("TWILIO_NUMBER")
-    content_sid = os.getenv("TWILIO_CONTENT_SID")
+def _validate_twilio_config(twilio: ConfigTwilio) -> tuple[str, str]:
+    """Valida e retorna o número e o template obrigatórios do Twilio."""
+    sender_number = twilio.numero
+    content_sid = twilio.content_sid
 
     missing = []
     if not sender_number:
@@ -18,14 +23,15 @@ def _validate_twilio_env_vars() -> tuple[str, str]:
         missing.append("TWILIO_CONTENT_SID")
 
     if missing:
-        raise EnvironmentError(
-            f"Variáveis de ambiente obrigatórias não configuradas no .env: {', '.join(missing)}"
+        raise ConfigException(
+            f"Chaves obrigatórias não configuradas no profile: {', '.join(missing)}"
         )
 
     return sender_number, content_sid
 
 
 def send_whatsapp_quote_notification(
+    twilio: ConfigTwilio,
     recipient_whatsapp_number: str,
     supplier_sharepoint_url: str,
     supplier_name: str = "Fornecedor",
@@ -43,8 +49,8 @@ def send_whatsapp_quote_notification(
       - to: número de destino
       - date_sent: data/hora do envio
     """
-    twilio_client = Twilio.returnClient()
-    sender_whatsapp_number, twilio_template_content_sid = _validate_twilio_env_vars()
+    twilio_client = Twilio.returnClient(twilio)
+    sender_whatsapp_number, twilio_template_content_sid = _validate_twilio_config(twilio)
 
     formatted_current_date = datetime.now().strftime("%d/%m/%Y")
 
@@ -81,8 +87,8 @@ def send_whatsapp_quote_notification(
         "date_sent": formatted_current_date,
     }
 
-    print(
-        f"✓ Cotação enviada para {recipient_whatsapp_number} "
-        f"(SID: {message.sid} | Status: {message.status})"
+    log.info(
+        "Cotacao enviada para %s (SID: %s | Status: %s)",
+        recipient_whatsapp_number, message.sid, message.status,
     )
     return send_result

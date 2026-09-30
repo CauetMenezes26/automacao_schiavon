@@ -15,10 +15,11 @@ import argparse
 import re
 from pathlib import Path
 
-from cotacao.cotacao_db import save_meat_supplier
-from utils.connection import connect_db, load_env
+from domain.service.cotacao_service import save_meat_supplier
+from commons.db import connect_db
+from domain.config import carregar_config
 
-from utils.paths import ENV_PATH, READ_DIR  # noqa: E402
+from commons.paths import READ_DIR  # noqa: E402
 
 SUPPLIER_EXCEL_PATH = Path(
     r"C:\Users\Cauet\OneDrive\Documents\Fornecedores_Automação_Schiavon.xlsx"
@@ -106,8 +107,8 @@ def main() -> None:
         description="Importa fornecedores do Excel de cadastro para dim_fornecedor."
     ).parse_args()
 
-    env = load_env(ENV_PATH)
-    conn = connect_db(env)
+    config = carregar_config()
+    conn = connect_db(config.banco)
     try:
         n = import_suppliers_from_excel(conn)
         print()

@@ -1,6 +1,6 @@
 """Conciliação Cotação × Invoice — regras da nota.
 
-`_resolver_fornecedor` acha o fornecedor do nome lido; `_reconcile_one_invoice`
+`_resolver_fornecedor` acha o fornecedor do nome lido; `reconcile_one_invoice`
 compara o preço faturado com o cotado, item a item, e devolve o resultado (não
 grava). A orquestração do período e a gravação moram em
 `crawler/flow/conciliacao_flow.py`; o motor puro em `commons/matcher.py`.
@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
+from commons.datas import week_bounds
 from commons.matcher import (
     InvoiceLine,
     QuoteLine,
@@ -28,6 +29,9 @@ from domain.service.conciliacao_service import (
     fetch_quote_lines,
     fetch_request_for_date,
 )
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
 
 # Abaixo disto a leitura do PDF não é confiável o bastante para acusar erro.
 MIN_READING_CONFIDENCE = Decimal("70")
@@ -39,7 +43,7 @@ MIN_READING_CONFIDENCE = Decimal("70")
 # é largo. Subir este número volta a derrubar a nota; descer encosta no ruído.
 SUPPLIER_FUZZY_THRESHOLD = 80.0
 
-# Códigos de divergência: vocabulário e descrições em utils/conciliacao_codes.py.
+# Códigos de divergência: vocabulário e descrições em domain/conciliacao_codes.py.
 # Apelidos locais para não reescrever o corpo do módulo. IssueCode é StrEnum, então
 # cada apelido É a string ("supplier_unmapped" etc.) — comparações e `sorted` seguem
 # iguais, e o SUPPLIER_ERP_ONLY continua significando "não-carne: compara com o ERP,
@@ -54,12 +58,6 @@ PRICE_BELOW_QUOTE = IssueCode.PRICE_BELOW_QUOTE
 UNIT_MISMATCH = IssueCode.UNIT_MISMATCH
 LOW_VISION_CONFIDENCE = IssueCode.LOW_VISION_CONFIDENCE
 HANDWRITTEN_PRESENT = IssueCode.HANDWRITTEN_PRESENT
-
-
-def _week_bounds(reference: date) -> tuple[date, date]:
-    """Segunda a domingo da semana da data informada."""
-    start = reference - timedelta(days=reference.weekday())
-    return start, start + timedelta(days=6)
 
 
 def _resolver_fornecedor(
@@ -94,7 +92,7 @@ def _resolver_fornecedor(
     return None, "unmatched", score
 
 
-def _reconcile_one_invoice(
+def reconcile_one_invoice(
     conn, header: dict, items: list[dict], aliases: dict, sinonimos: dict | None = None,
 ) -> dict:
     """Concilia uma invoice. Retorna {header: ..., items: [...]}.
@@ -145,8 +143,10 @@ def _reconcile_one_invoice(
     # Casou por aproximação: a nota entra na conciliação, mas sai marcada.
     por_aproximacao = nivel == "fuzzy"
     if por_aproximacao:
-        print(f"  ≈ {str(header.get('supplier_name'))[:38]:<40} "
-              f"→ {alias['canonical_name']}  ({score:.0f}%, conferir)")
+        log.info(
+            "fornecedor por aproximacao: %-40s -> %s (%.0f%%, conferir)",
+            str(header.get("supplier_name"))[:38], alias["canonical_name"], score,
+        )
 
     base.update({
         "id_supplier": alias["canonical_id"],

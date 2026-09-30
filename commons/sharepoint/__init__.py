@@ -10,6 +10,12 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, quote as urlquote, unquote, urlparse
 from playwright.sync_api import TimeoutError as PwTimeout
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
+
+#_LIMITE_DOWNLOAD_TESTE: int | None
+
 
 # Step: nome de pasta (str) ou função que recebe a listagem e retorna a pasta
 Step = str | Callable[[list[dict]], dict | None]
@@ -24,6 +30,16 @@ _PT_MES = {
 # ---------------------------------------------------------------------------
 # Helpers de data / nome de pasta
 # ---------------------------------------------------------------------------
+
+def last_week_reference(reference: date | None = None) -> date:
+    """Retorna a data de 7 dias antes da referência (padrão: hoje).
+
+    Usada para navegar até a pasta da semana passada em vez da corrente —
+    o SharePoint só termina de consolidar os arquivos da semana alguns dias
+    depois dela fechar.
+    """
+    return (reference or date.today()) - timedelta(days=7)
+
 
 def current_year_folder(reference: date | None = None) -> str:
     """Retorna o ano da data de referência como string (ex: '2026'). Padrão: hoje."""
@@ -92,7 +108,10 @@ def resolve_week_folder(entries: list[dict], reference: date | None = None) -> d
     fallback_day = (ref - timedelta(days=7)).day
     match = _match_week_folder(entries, fallback_day)
     if match:
-        print(f"    ⚠ Semana do dia {ref.day} não encontrada, usando semana anterior: {match['name']}")
+        log.warning(
+            "Semana do dia %s nao encontrada, usando semana anterior: %s",
+            ref.day, match['name'],
+        )
     return match
 
 
@@ -204,7 +223,7 @@ def navigate(context, site_url: str, base: str, root_path: str, steps: list[Step
             label = step
             match = next((e for e in entries if e["name"].lower() == step.lower()), None)
 
-        print(f"    → {label}")
+        log.info("-> %s", label)
 
         if match is None:
             available = ", ".join(e["name"] for e in entries) or "(vazio)"
@@ -261,14 +280,16 @@ def _already_downloaded(original_name: str, *search_dirs: Path) -> Path | None:
     """
     Verifica se o arquivo original do SharePoint já foi baixado anteriormente.
     Busca pelo stem do nome original dentro dos diretórios informados.
+    Recursivo porque read_files/ agora agrupa os arquivos em subpastas por dia
+    de leitura (invoice_DD-MM-AAAA/).
     Retorna o caminho encontrado ou None.
     """
     stem = Path(original_name).stem.lower()
     for directory in search_dirs:
         if not directory.exists():
             continue
-        for existing in directory.iterdir():
-            if stem in existing.name.lower():
+        for existing in directory.rglob("*"):
+            if existing.is_file() and stem in existing.name.lower():
                 return existing
     return None
 
@@ -293,10 +314,15 @@ def download_files(
     check_dirs = [dest_dir] + (skip_dirs or [])
     downloaded: list[Path] = []
 
+    global _LIMITE_DOWNLOAD_TESTE
+
     files_only = [e for e in entries if e["type"] == "arquivo"]
     if not files_only:
-        print("  Nenhum arquivo para baixar.")
+        log.info("Nenhum arquivo para baixar.")
         return downloaded
+
+    # if _LIMITE_DOWNLOAD_TESTE is not None:
+    #     files_only = files_only[:max(_LIMITE_DOWNLOAD_TESTE, 0)]
 
     for entry in files_only:
         original_name = entry["name"]
@@ -304,12 +330,12 @@ def download_files(
         # Verifica se o arquivo já existe (pelo nome original do SharePoint)
         existing = _already_downloaded(original_name, *check_dirs)
         if existing:
-            print(f"  ✓ já existe: {original_name}  →  {existing.name}  (ignorado)")
+            log.info("ja existe: %s -> %s (ignorado)", original_name, existing.name)
             continue
 
         dest_name = _build_filename(prefix, original_name)
         dest_path = dest_dir / dest_name
-        print(f"  Baixando : {original_name}  →  {dest_name}")
+        log.info("Baixando : %s -> %s", original_name, dest_name)
 
         parsed = urlparse(entry["web_url"])
         path_parts = [p for p in parsed.path.split("/") if p]
@@ -327,11 +353,14 @@ def download_files(
                 dest_path.write_bytes(resp.body())
                 downloaded.append(dest_path)
                 size_kb = dest_path.stat().st_size / 1024
-                print(f"  ✓ {size_kb:.1f} KB")
+                log.info("%.1f KB", size_kb)
             else:
-                print(f"  ✗ status={resp.status}  content-type={content_type[:80]}")
+                log.error("status=%s content-type=%s", resp.status, content_type[:80])
         except Exception as exc:
-            print(f"  ✗ Falha: {exc}")
+            log.error("Falha: %s", exc)
+
+    # if _LIMITE_DOWNLOAD_TESTE is not None:
+    #     _LIMITE_DOWNLOAD_TESTE -= len(downloaded)
 
     return downloaded
 
@@ -355,7 +384,7 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
     if "login.microsoftonline.com" not in page.url:
         return
 
-    print("  [login] Autenticando no Microsoft...")
+    log.info("[login] Autenticando no Microsoft...")
     try:
         page.wait_for_selector('input[name="loginfmt"]', timeout=15_000)
         page.fill('input[name="loginfmt"]', username)
@@ -381,21 +410,29 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
             raise SharePointLoginError(f"login recusado: {el.inner_text()[:200]}")
 
     _dismiss_kmsi_prompt(page)
+    _confirmar_saida_do_portal(page)
 
-    if "login.microsoftonline.com" in page.url:
-        try:
-            page.wait_for_url(
-                lambda url: "login.microsoftonline.com" not in url,
-                timeout=15_000,
-            )
-        except PwTimeout as exc:
-            _debug_dump(page, "timeout_pos_kmsi")
-            raise SharePointLoginError(
-                f"ainda no portal de login após submeter as credenciais "
-                f"(url atual: {page.url})"
-            ) from exc
+    log.info("[login] Concluido.")
 
-    print("  [login] Concluído.")
+
+def _confirmar_saida_do_portal(page) -> None:
+    """Espera a URL deixar o portal Microsoft. Função à parte para o `try`
+    caber uma vez só por função (governança)."""
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    if "login.microsoftonline.com" not in page.url:
+        return
+    try:
+        page.wait_for_url(
+            lambda url: "login.microsoftonline.com" not in url,
+            timeout=15_000,
+        )
+    except PwTimeout as exc:
+        _debug_dump(page, "timeout_pos_kmsi")
+        raise SharePointLoginError(
+            f"ainda no portal de login após submeter as credenciais "
+            f"(url atual: {page.url})"
+        ) from exc
 
 
 def _dismiss_kmsi_prompt(page) -> None:
@@ -421,10 +458,10 @@ def _debug_dump(page, tag: str) -> None:
         page.screenshot(path=f"debug_{tag}_{ts}.png", full_page=True)
         with open(f"debug_{tag}_{ts}.html", "w", encoding="utf-8") as f:
             f.write(page.content())
-        print(f"  [debug] url no momento da falha: {page.url}")
-        print(f"  [debug] screenshot salvo em debug_{tag}_{ts}.png")
+        log.info("[debug] url no momento da falha: %s", page.url)
+        log.info("[debug] screenshot salvo em debug_%s_%s.png", tag, ts)
     except Exception as e:
-        print(f"  [debug] falhou ao salvar dump: {e}")
+        log.error("[debug] falhou ao salvar dump: %s", e)
 
 
 def _navigate_browser_to(page, base: str, final_path: str) -> None:
@@ -464,13 +501,13 @@ def _process_record(
     page.wait_for_url(f"**{parsed.netloc}**", timeout=30_000)
     page.wait_for_load_state("networkidle", timeout=30_000)
 
-    print(f"  Raiz: {root_folder_path}")
+    log.info("Raiz: %s", root_folder_path)
     final_path, entries = navigate(context, site_url, base, root_folder_path, nav_steps)
     _navigate_browser_to(page, base, final_path)
 
     downloaded: list[Path] = []
     if dest_dir is not None:
-        print(f"\n  Download → {dest_dir}")
+        log.info("Download -> %s", dest_dir)
         downloaded = download_files(context, entries, record, dest_dir, skip_dirs=skip_dirs)
 
     return final_path, entries, downloaded
@@ -550,8 +587,10 @@ def create_file_sharing_link(
             f"Resposta de ShareLink sem Url para '{server_relative_url}': "
             f"{resp.text()[:300]}"
         )
-    print(f"  ✓ Link de compartilhamento (anônimo, "
-          f"{'edição' if can_edit else 'leitura'}): {url}")
+    log.info(
+        "Link de compartilhamento (anonimo, %s): %s",
+        'edição' if can_edit else 'leitura', url,
+    )
     return {"url": url, "raw": info}
 
 
@@ -589,7 +628,7 @@ def ensure_folder_exists(context, site_url: str, folder_path: str) -> None:
             data=f'{{"__metadata": {{"type": "SP.Folder"}}, "ServerRelativeUrl": "{partial}"}}',
         )
         if resp.ok:
-            print(f"  ✓ Pasta criada: {partial}")
+            log.info("Pasta criada: %s", partial)
         elif resp.status != 500:
             raise RuntimeError(f"Erro {resp.status} ao criar pasta '{partial}': {resp.text()[:300]}")
 
@@ -653,10 +692,9 @@ def upload_file_to_sharepoint(
 
         owner = _lock_owner(resp.text()) or "outro usuário"
         if attempt < UPLOAD_LOCK_RETRIES:
-            print(
-                f"  ⚠ '{file_name}' travado por {owner}. "
-                f"Nova tentativa em {UPLOAD_LOCK_WAIT_SECONDS}s "
-                f"({attempt}/{UPLOAD_LOCK_RETRIES - 1})."
+            log.warning(
+                "'%s' travado por %s. Nova tentativa em %ss (%s/%s).",
+                file_name, owner, UPLOAD_LOCK_WAIT_SECONDS, attempt, UPLOAD_LOCK_RETRIES - 1,
             )
             time.sleep(UPLOAD_LOCK_WAIT_SECONDS)
 
@@ -676,7 +714,7 @@ def upload_file_to_sharepoint(
     result_data = resp.json().get("d", {})
     server_relative_url = result_data.get("ServerRelativeUrl", f"{folder_path}/{file_name}")
 
-    print(f"  ✓ Upload: {file_name} → {server_relative_url}")
+    log.info("Upload: %s -> %s", file_name, server_relative_url)
     return {
         "server_relative_url": server_relative_url,
         "file_name": file_name,
@@ -699,10 +737,10 @@ def get_file_sharing_url(context, site_url: str, server_relative_url: str) -> st
         if resp.ok:
             linking_uri = resp.json().get("d", {}).get("LinkingUri")
             if linking_uri:
-                print(f"  ✓ Link de compartilhamento: {linking_uri}")
+                log.info("Link de compartilhamento: %s", linking_uri)
                 return linking_uri
     except Exception as exc:
-        print(f"  ⚠ Erro ao obter link de compartilhamento: {exc}")
+        log.error("Erro ao obter link de compartilhamento: %s", exc)
     return None
 
 
@@ -722,7 +760,7 @@ def download_single_file(context, site_url: str, server_relative_url: str, dest_
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     dest_path.write_bytes(resp.body())
     size_kb = dest_path.stat().st_size / 1024
-    print(f"  ✓ Download: {dest_path.name} ({size_kb:.1f} KB)")
+    log.info("Download: %s (%.1f KB)", dest_path.name, size_kb)
     return dest_path
 
 
@@ -761,7 +799,7 @@ def open_sharepoint_session(username: str, password: str, site_url: str, headles
     if parsed.netloc not in page.url:
         page.wait_for_url(f"**{parsed.netloc}**", timeout=60_000)
     page.wait_for_load_state("load", timeout=60_000)
-    print("  [login] Sessão SharePoint aberta.")
+    log.info("[login] Sessao SharePoint aberta.")
 
     return pw, browser, context, page
 
@@ -770,7 +808,7 @@ def process_all_configs(
     records: list[dict],
     username: str,
     password: str,
-    nav_steps: list[Step],
+    resolve_reference: Callable[[dict], date],
     headless: bool = False,
     keep_open: bool = False,
     download_dir: Path | None = None,
@@ -780,6 +818,13 @@ def process_all_configs(
     """
     Abre o Chromium UMA VEZ, faz login e processa cada config em sequência.
     Retorna lista de dicionários com record, status, final_path e entries.
+
+    `resolve_reference(record)` decide, POR record, qual semana navegar —
+    cada config pode cair numa referência diferente (ex.: uma loja retomando
+    a semana anterior porque ainda não fechou o download dela, enquanto outra
+    já avança pra semana nova). O resultado de cada record carrega essa
+    referência em `"referencia"`, pra quem grava o caso usar a semana que
+    REALMENTE foi navegada, não uma fixa.
     """
     from playwright.sync_api import sync_playwright
 
@@ -792,10 +837,10 @@ def process_all_configs(
         page = context.new_page()
 
         for record in records:
-            print(f"\n{'='*60}")
-            print(f"[{record['id']}] {record['name']}")
-            print(f"    {record.get('description') or ''}")
-            print(f"{'='*60}")
+            referencia = resolve_reference(record)
+            nav_steps = build_nav_steps(referencia)
+
+            log.info("[%s] %s", record['id'], record['name'])
 
             status = False
             final_path: str | None = None
@@ -810,25 +855,25 @@ def process_all_configs(
                     dest_dir=download_dir, skip_dirs=skip_dirs,
                 )
                 status = True
-                print(f"\n  Pasta final : {final_path}")
-                print(f"  Itens encontrados: {len(entries)}")
+                log.info("Pasta final : %s", final_path)
+                log.info("Itens encontrados: %s", len(entries))
                 for e in entries:
                     if e["type"] == "pasta":
-                        print(f"    [pasta  ] {e['name']}  ({e.get('item_count', '?')} itens)")
+                        log.info("[pasta ] %s (%s itens)", e['name'], e.get('item_count', '?'))
                     else:
                         size = f"  {e['size_bytes']:,} B" if e.get("size_bytes") else ""
                         mod = f"  [{e['last_modified'][:10]}]" if e.get("last_modified") else ""
-                        print(f"    [arquivo] {e['name']}{size}{mod}")
+                        log.info("[arquivo] %s%s%s", e['name'], size, mod)
                 if downloaded:
-                    print(f"\n  {len(downloaded)} arquivo(s) baixado(s).")
+                    log.info("%s arquivo(s) baixado(s).", len(downloaded))
             except SharePointLoginError as exc:
                 error_msg = str(exc)
                 error_tipo = "login"
-                print(f"\n  ERRO DE LOGIN: {error_msg}")
+                log.info("ERRO DE LOGIN: %s", error_msg)
             except Exception as exc:
                 error_msg = str(exc)
                 error_tipo = "navegacao"
-                print(f"\n  ERRO: {error_msg}")
+                log.info("ERRO: %s", error_msg)
 
             result = {
                 "record": record,
@@ -838,6 +883,7 @@ def process_all_configs(
                 "error_tipo": error_tipo,
                 "entries": entries,
                 "downloaded": [str(p) for p in downloaded],
+                "referencia": referencia,
             }
             results.append(result)
 

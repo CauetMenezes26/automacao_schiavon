@@ -1,62 +1,79 @@
 """Transporte de e-mail (SMTP) — um lugar só.
 
-O núcleo SMTP vivia em `cotacao/email_sender.py`, que lia `SMTP_*` de
-`os.getenv`. O resto do projeto passa `env` (dict de `load_env`) adiante, então
-aqui a config vem do `env`. `cotacao/email_sender.py` (cotação ao fornecedor) e
-`utils/monitor.py` (alerta à operação) usam esta função.
+`cotacao/email_sender.py` (cotação ao fornecedor) e
+`domain/service/sistema_service.py` (alerta à operação) usam `enviar_email`.
+A config chega como `ConfigSmtp`, montada em `domain/config.py` a partir do
+profile — este módulo é `commons` e não lê profile nem ambiente.
 """
 
 from __future__ import annotations
 
 import smtplib
+from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-__all__ = ["enviar_email", "SMTP_KEYS"]
+from .exception import ConfigException
+from commons.logging_config import get_logger
 
-SMTP_KEYS = ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM")
+log = get_logger(__name__)
+
+__all__ = ["enviar_email", "ConfigSmtp"]
 
 
-def _config(env: dict) -> dict[str, str]:
-    cfg = {k: (env.get(k) or "").strip() for k in SMTP_KEYS}
-    faltando = [k for k in SMTP_KEYS if not cfg[k]]
-    if faltando:
-        raise EnvironmentError(
-            f"SMTP não configurado: falta {', '.join(faltando)} no .env."
-        )
-    return cfg
+@dataclass(frozen=True)
+class ConfigSmtp:
+    host: str
+    port: str
+    usuario: str
+    senha: str = field(repr=False)
+    remetente: str
+
+    def faltando(self) -> list[str]:
+        """Chaves do profile ainda nao preenchidas, para a mensagem de erro."""
+        return [
+            chave for chave, valor in (
+                ("SMTP_HOST", self.host), ("SMTP_PORT", self.port),
+                ("SMTP_USER", self.usuario), ("SMTP_PASSWORD", self.senha),
+                ("SMTP_FROM", self.remetente),
+            ) if not valor
+        ]
 
 
 def enviar_email(
-    env: dict,
+    smtp: ConfigSmtp,
     destino: str,
     assunto: str,
     corpo_html: str,
     corpo_txt: str | None = None,
 ) -> dict:
     """Envia um e-mail. Retorna dict de log; não levanta em falha de SMTP
-    (retorna `status='error'`), mas levanta `EnvironmentError` se o `.env` não
+    (retorna `status='error'`), mas levanta `ConfigException` se o profile não
     tem as chaves — quem chama decide o que fazer com config ausente."""
-    cfg = _config(env)
+    faltando = smtp.faltando()
+    if faltando:
+        raise ConfigException(
+            f"SMTP não configurado: falta {', '.join(faltando)} no profile."
+        )
     agora = datetime.now().strftime("%d/%m/%Y %H:%M")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = assunto
-    msg["From"] = cfg["SMTP_FROM"]
+    msg["From"] = smtp.remetente
     msg["To"] = destino
     msg.attach(MIMEText(corpo_txt or _html_para_txt(corpo_html), "plain", "utf-8"))
     msg.attach(MIMEText(corpo_html, "html", "utf-8"))
 
     try:
-        with smtplib.SMTP(cfg["SMTP_HOST"], int(cfg["SMTP_PORT"])) as server:
+        with smtplib.SMTP(smtp.host, int(smtp.port)) as server:
             server.starttls()
-            server.login(cfg["SMTP_USER"], cfg["SMTP_PASSWORD"])
+            server.login(smtp.usuario, smtp.senha)
             server.send_message(msg)
-        print(f"  ✓ e-mail enviado para {destino}")
+        log.info("e-mail enviado para %s", destino)
         return {"status": "sent", "to": destino, "date_sent": agora}
     except Exception as exc:  # noqa: BLE001 — o chamador loga/alerta
-        print(f"  ✗ falha ao enviar e-mail para {destino}: {exc}")
+        log.error("falha ao enviar e-mail para %s: %s", destino, exc)
         return {"status": "error", "to": destino, "date_sent": agora, "error": str(exc)}
 
 
