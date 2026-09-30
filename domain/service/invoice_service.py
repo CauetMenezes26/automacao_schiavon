@@ -29,18 +29,23 @@ from psycopg2.extras import RealDictCursor
 
 from commons.texto import truncar
 from domain.classificacao import tipo_linha
-from domain.enums import EtapaEnum as Etapa, StatusExecEnum as Status
+from domain.enums import Etapa, StatusExecucao as Status
 from domain.service import processo_service as proc
 from domain.service.processo_service import SCHEMA
 
 if TYPE_CHECKING:
-    from .vision import InvoiceData
+    # `.vision` nao existe em domain/service/ — o import so nao estourava
+    # porque TYPE_CHECKING e False em runtime. O schema mora ao lado do
+    # cliente da Vision.
+    from commons.vision.schema import InvoiceData
 
 # Abaixo disto a leitura da nota fica marcada para conferência humana (`revisar`),
-# mas NÃO trava: a nota segue para a conciliação normalmente. É diferente do
-# MIN_READING_CONFIDENCE do reconcile_quote.py (70), cujo propósito é outro —
-# "confiável o bastante para ACUSAR erro de preço".
-CONFIANCA_MINIMA_PAINEL = 60
+# mas NÃO trava: a nota segue para a conciliação normalmente. Mesmo valor do
+# MIN_READING_CONFIDENCE do reconcile_quote.py por coincidência de piso, não de
+# proposito — la o sentido e outro: "confiavel o bastante para ACUSAR erro de
+# preco". Os dois pisos continuam variaveis separadas de proposito (podem
+# divergir de novo no futuro).
+CONFIANCA_MINIMA_PAINEL = 70
 
 # Tolerância da conferência de soma da nota (G9): fecha quando
 # |total - soma(item+encargo)| não passa de 1% do total (piso de 5 centavos).
@@ -87,15 +92,47 @@ def fetch_all_configs(conn) -> list[dict]:
 # Caso 'coleta' — a varredura
 # ---------------------------------------------------------------------------
 
+# Desfechos que fecham a semana anterior para a varredura da loja.
+# Terminais de sucesso do fluxo COLETA (`domain/enums.py:Etapa.BAIXAR.e_a_ultima`);
+# pasta vazia (`ENCERRADO_SEM_ARQUIVO`) conta como completa — não é erro. Pasta
+# não encontrada (`ERRO_NAVEGACAO`) também fecha: a loja não entregou aquela
+# semana, e insistir nela para sempre impedia a semana atual de ser coletada.
+# `ERRO_LOGIN` NÃO fecha — é indisponibilidade do SharePoint, e a semana
+# anterior ainda precisa ser baixada quando ele voltar.
+_COLETA_FECHADA = (
+    Status.FINALIZADO, Status.FINALIZADO_COM_ALERTA, Status.ENCERRADO_SEM_ARQUIVO,
+    Status.ERRO_NAVEGACAO,
+)
+
+
 def abrir_coleta(conn, id_loja: int, referencia: date) -> int:
     """Abre (ou recupera) o caso da varredura desta loja nesta semana."""
     return proc.abrir(
         conn,
         cod_tipo="coleta",
-        chave_natural=f"loja{id_loja}:{referencia:%Y-%m-%d}",
+        identificador_processo=f"loja{id_loja}:{referencia:%Y-%m-%d}",
         id_loja=id_loja,
-        referencia=referencia,
+        dt_origem=referencia,
     )
+
+
+def resolver_referencia_coleta(
+    conn, id_loja: int, referencia_nova: date, referencia_anterior: date,
+) -> date:
+    """Decide qual semana navegar nesta execução para esta loja: a nova, ou a
+    anterior se ela ainda não fechou o download de todos os arquivos (regra de
+    negócio — não avança pra semana nova sem fechar a anterior, por loja).
+    Pasta da semana anterior inexistente (`ERRO_NAVEGACAO`) conta como fechada
+    (ver `_COLETA_FECHADA`).
+
+    Ausência de caso para a semana anterior também conta como "não completa"
+    (nunca rodou) — converge sozinho: o robô navega a anterior uma vez, fecha
+    o caso dela, e no tick seguinte já libera a nova. Quem chama decide o que
+    fazer com um retorno != `referencia_nova` (hoje, avisar no log)."""
+    caso_anterior = proc.buscar(conn, "coleta", f"loja{id_loja}:{referencia_anterior:%Y-%m-%d}")
+    completo = (caso_anterior is not None
+                and Status(caso_anterior["cod_status"]) in _COLETA_FECHADA)
+    return referencia_nova if completo else referencia_anterior
 
 
 def registrar_navegacao(
@@ -152,14 +189,14 @@ def save_invoice(
     """Persiste a nota e suas linhas. Retorna (id_da_nota, linhas_inseridas).
 
     Cria o caso 'invoice' se ainda não existir e avança até LER. O nome do
-    arquivo é a chave natural: reprocessar a mesma nota não duplica o caso.
+    arquivo é o identificador do processo: reprocessar a mesma nota não duplica o caso.
     """
     id_processo = proc.abrir(
         conn,
         cod_tipo="invoice",
-        chave_natural=file_path.name,
+        identificador_processo=file_path.name,
         id_loja=id_loja,
-        referencia=data.invoice_date,
+        dt_origem=data.invoice_date,
     )
     proc.concluir_etapa(conn, id_processo, Etapa.COLETAR)
 
@@ -173,22 +210,24 @@ def save_invoice(
         cur.execute(
             f"""
             INSERT INTO {SCHEMA}.fat_invoice (
-                id_processo, id_loja, fornecedor_lido, numero, emissao,
-                vencimento, moeda, subtotal, imposto, total, arquivo,
+                id_processo, id_loja, nome_fornecedor, numero_invoice, dt_emissao,
+                dt_vencimento, moeda, subtotal, imposto, total, arquivo,
                 confianca, modelo_ia, custo_usd, observacao_ia,
+                anotacao_manual_geral,
                 soma_itens, fecha, revisar, motivo_revisao
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (id_processo) DO UPDATE SET
-                fornecedor_lido = EXCLUDED.fornecedor_lido,
-                numero          = EXCLUDED.numero,
-                emissao         = EXCLUDED.emissao,
-                total           = EXCLUDED.total,
-                confianca       = EXCLUDED.confianca,
-                custo_usd       = EXCLUDED.custo_usd,
-                soma_itens      = EXCLUDED.soma_itens,
-                fecha           = EXCLUDED.fecha,
-                revisar         = EXCLUDED.revisar,
-                motivo_revisao  = EXCLUDED.motivo_revisao
+                nome_fornecedor        = EXCLUDED.nome_fornecedor,
+                numero_invoice          = EXCLUDED.numero_invoice,
+                dt_emissao              = EXCLUDED.dt_emissao,
+                total                  = EXCLUDED.total,
+                confianca              = EXCLUDED.confianca,
+                custo_usd              = EXCLUDED.custo_usd,
+                anotacao_manual_geral  = EXCLUDED.anotacao_manual_geral,
+                soma_itens             = EXCLUDED.soma_itens,
+                fecha                  = EXCLUDED.fecha,
+                revisar                = EXCLUDED.revisar,
+                motivo_revisao         = EXCLUDED.motivo_revisao
             RETURNING id
             """,
             (
@@ -203,12 +242,30 @@ def save_invoice(
                 truncar(getattr(data, "model_ai", None), 80),
                 custo if custo is not None else getattr(data, "cost_read", None),
                 data.reading_notes,
+                data.general_handwritten_notes,
                 soma_itens, fecha, revisar, motivo_revisao,
             ),
         )
         id_invoice = cur.fetchone()[0]
 
         # Reprocesso apaga as linhas antigas: a leitura pode mudar de resultado.
+        # Se a nota já passou pela conciliação ERP antes (FLUXO 4), `fat_
+        # conciliacao_item.id_invoice_item` referencia essas linhas — sem
+        # `ON DELETE CASCADE` nessa FK (só `id_conciliacao` tem), apagar
+        # direto quebra com "violates foreign key constraint". Como os itens
+        # em si vão sumir, a comparação antiga contra o PO já não faz mais
+        # sentido de qualquer forma — apaga primeiro; a próxima conciliação
+        # regrava `fat_conciliacao` (header) via `ON CONFLICT (id_invoice,
+        # comparacao)`, então não precisa apagar o header aqui.
+        cur.execute(
+            f"""
+            DELETE FROM {SCHEMA}.fat_conciliacao_item
+             WHERE id_invoice_item IN (
+                 SELECT id FROM {SCHEMA}.fat_invoice_item WHERE id_invoice = %s
+             )
+            """,
+            (id_invoice,),
+        )
         cur.execute(
             f"DELETE FROM {SCHEMA}.fat_invoice_item WHERE id_invoice = %s",
             (id_invoice,),
@@ -225,14 +282,19 @@ def save_invoice(
                 tipo_linha(item.description),
                 qtd, truncar(item.unit, 30), preco, valor,
                 getattr(item, "handwritten_notes", None),
+                truncar(getattr(item, "item_code", None), 40),
+                truncar(getattr(item, "upc", None), 20),
+                getattr(item, "cases", None),
+                truncar(getattr(item, "handwritten_code", None), 40),
             ))
         if linhas:
             cur.executemany(
                 f"""
                 INSERT INTO {SCHEMA}.fat_invoice_item
                     (id_invoice, ordem, descricao, tipo_linha, qtd, unidade,
-                     preco_unit, valor_linha, anotacao_manual)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     preco_unit, valor_linha, anotacao_manual, item_code, upc,
+                     caixas, codigo_manual)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
                 linhas,
             )

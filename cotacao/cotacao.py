@@ -7,7 +7,6 @@ cotação, sem rodar o pipeline inteiro).
 from crawler.flow.cotacao_flow import avancar_cotacao, cotacao_flow  # noqa: F401
 
 if __name__ == "__main__":
-    from commons.db import load_env
-    from commons.paths import ENV_PATH
+    from domain.config import carregar_config
 
-    avancar_cotacao(load_env(ENV_PATH))
+    avancar_cotacao(carregar_config())

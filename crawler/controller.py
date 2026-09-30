@@ -1,15 +1,16 @@
 """Controller — orquestração do pipeline.
 
-`executar()` roda os cinco fluxos em sequência, sempre. Não há flags: o recorte
+`executar()` roda os seis fluxos em sequência, sempre. Não há flags: o recorte
 por fluxo e os atalhos avulsos saíram daqui; quem precisa de um passo isolado
 chama a fachada do módulo. O que cada fluxo faz mora na sua fachada; aqui só a
 ordem.
 
-    FLUXO 1/5  Sincroniza o de-para de sinônimos de item (planilha -> banco)
-    FLUXO 2/5  Coleta e leitura de invoices (SharePoint -> Vision -> banco)
-    FLUXO 3/5  Cotação semanal de carnes (um passo do ciclo)
-    FLUXO 4/5  Conciliação cotação x invoice (compara e grava)
-    FLUXO 5/5  Monitor — consolida status dos sistemas e alerta a operação
+    FLUXO 1/6  Sincroniza o de-para de sinônimos de item (planilha -> banco)
+    FLUXO 2/6  Coleta e leitura de invoices (SharePoint -> Vision -> banco)
+    FLUXO 3/6  Cotação semanal de carnes (um passo do ciclo)
+    FLUXO 4/6  Conciliação invoice x PO do Catapult (ERP) — toda nota
+    FLUXO 5/6  Monitor — consolida status dos sistemas e alerta a operação
+    FLUXO 6/6  Painel — relatório cotação x invoice (files/relatorios)
 
 Fino de propósito: monta o `Pipeline` (`crawler/pipeline.py`) e chama uma
 fachada por fluxo. Sem argparse, sem recorte. As fachadas de fluxo migram para
@@ -19,83 +20,84 @@ fachada por fluxo. Sem argparse, sem recorte. As fachadas de fluxo migram para
 from __future__ import annotations
 
 from commons.banner import imprimir_banner
-from commons.db import connect_db, load_env
-from commons.paths import ENV_PATH
-from crawler.flow.conciliacao_flow import conciliacao_flow
+from commons.db import conexao
+from commons.logging_config import get_logger
+# Conciliação cotação x invoice — desativada de propósito: a conferência
+# correta de toda nota é contra o pedido (PO) no Catapult (FLUXO 4, abaixo),
+# não contra a cotação semanal de carnes. Import e chamada ficam comentados,
+# não removidos — se um dia a comparação por cotação voltar a ser necessária,
+# está guardada aqui. Ver domain/categorias.py.
+# from crawler.flow.conciliacao_flow import conciliacao_flow
 from crawler.flow.cotacao_flow import cotacao_flow
 from crawler.flow.invoices_flow import invoices_flow
 from crawler.flow.monitor_flow import monitor_flow
 from crawler.flow.painel_flow import painel_flow
+from crawler.flow.reconcile_erp_flow import reconcile_erp_flow
 from crawler.flow.sinonimos_flow import sinonimos_flow
 from crawler.pipeline import Pipeline
+from domain.config import Config, carregar_config
 from domain.service import sistema_service
 from domain.service.agendamento_service import registrar_heartbeat
 
-TOTAL_FLUXOS = 6
+log = get_logger(__name__)
 
-# FLUXO 6 — Conciliação com o ERP Catapult: acessar o ERP, raspar os dados e
-# comparar com a nota.
-#
-# NÃO é um fluxo secundário, apesar de ainda não existir: é o único que vale
-# para TODA nota. O desenho é
-#
-#     fornecedor de carne   ->  ERP  +  cotação semanal
-#     qualquer outro        ->  ERP
-#
-# `dim_fornecedor.categoria` é quem faz esse roteamento (ver domain/categorias.py).
-# O modelo já está pronto para receber: `fat_conciliacao` tem
-# UNIQUE (id_invoice, comparacao) com comparacao IN ('cotacao','erp'), e
-# commons/matcher.py nasceu sem dependência do projeto para ser reaproveitado
-# aqui. Ligar quando o fluxo existir.
-CONCILIAR_ERP_ATIVO = False
+TOTAL_FLUXOS = 6
 
 
 def executar() -> None:
     imprimir_banner()
-    env = load_env(ENV_PATH)
+    config = carregar_config()
     pipeline = Pipeline(TOTAL_FLUXOS)
 
-    # registra em dim_sistema quais sistemas têm credencial no .env.
+    # registra em dim_sistema quais sistemas têm credencial no profile.
     # O resultado real de login durante os fluxos sobrescreve isto.
-    sistema_service.checar_ambiente(env)
+    sistema_service.checar_ambiente(config)
 
     # ------------------------------------------------------------------
-    # FLUXO 1/5 -- Sincroniza o de-para de sinônimos de item
-    # Lê files/sinonimos/*.xlsx e faz upsert em dim_item_sinonimo, para a
-    # conciliação rodar com o vocabulário atualizado. Planilha ausente ou
-    # travada no Excel -> pula e retoma na próxima execução.
+    # FLUXO 1/6 -- Sincroniza o de-para de sinônimos de item
+    # Lê a aba De-Para da planilha do Google Sheets (SINONIMOS_SHEET_ID) e faz
+    # upsert em dim_item_sinonimo, para a conciliação rodar com o vocabulário
+    # atualizado. SINONIMOS_SHEET_ID ausente ou Sheets fora do ar -> pula e
+    # retoma na próxima execução.
     # ------------------------------------------------------------------
-    pipeline.rodar(1, "Sinônimos", lambda: sinonimos_flow(env))
+    pipeline.rodar(1, "Sinônimos", lambda: sinonimos_flow(config))
 
     # ------------------------------------------------------------------
-    # FLUXO 2/5 -- Coleta e leitura de invoices
+    # FLUXO 2/6 -- Coleta e leitura de invoices
     # Baixa os PDFs da semana no SharePoint, manda o Claude Vision ler e
     # grava em fat_invoice / fat_invoice_item.
     # ------------------------------------------------------------------
-    pipeline.rodar(2, "Invoices", lambda: invoices_flow(env))
+    pipeline.rodar(2, "Invoices", lambda: invoices_flow(config))
 
     # ------------------------------------------------------------------
-    # FLUXO 3/5 -- Cotação semanal de carnes
+    # FLUXO 3/6 -- Cotação semanal de carnes
     # Avança UM passo do ciclo: abre a semana, ou verifica respostas e cobra
     # quem está atrasado. Não bloqueia.
     # ------------------------------------------------------------------
-    pipeline.rodar(3, "Cotação", lambda: cotacao_flow(env))
+    pipeline.rodar(3, "Cotação", lambda: cotacao_flow(config))
 
     # ------------------------------------------------------------------
-    # FLUXO 4/5 -- Conciliação cotação x invoice
-    # Compara o preço faturado com o cotado na semana da invoice e grava em
-    # fat_conciliacao / _item. Lê do banco, então roda mesmo que a coleta
-    # acima tenha falhado.
+    # FLUXO 4/6 -- Conciliação invoice x PO do Catapult (ERP)
+    # Busca o PO da invoice no Catapult pela Invoice Reference, raspa a grade
+    # Items e compara quantidade/valor item a item (commons/catapult +
+    # conciliacao/reconcile_erp.py). Vale para TODA nota, carne ou não — é a
+    # única comparação que sempre existe (domain/categorias.py).
+    #
+    # A antiga comparação contra a cotação semanal (linha abaixo) fica
+    # desativada e comentada, não removida: a conferência correta da invoice
+    # é contra o PO, não contra a cotação — mas se um dia isso mudar, está
+    # guardada.
+    # pipeline.rodar(4, "Conciliação", lambda: conciliacao_flow(config))
     # ------------------------------------------------------------------
-    pipeline.rodar(4, "Conciliação", lambda: conciliacao_flow(env))
+    pipeline.rodar(4, "Conciliação ERP", lambda: reconcile_erp_flow(config))
 
     # ------------------------------------------------------------------
-    # FLUXO 5/5 -- Monitor
+    # FLUXO 5/6 -- Monitor
     # Consolida o status de acesso dos sistemas e abre/fecha alertas à
     # operação (e-mail à GUVI, com dedupe). Lê o que os fluxos acima
     # deixaram; não depende de nenhum ter dado certo.
     # ------------------------------------------------------------------
-    pipeline.rodar(5, "Monitor", lambda: monitor_flow(env))
+    pipeline.rodar(5, "Monitor", lambda: monitor_flow(config))
 
     # ------------------------------------------------------------------
     # FLUXO 6/6 -- Relatorio Cotacao x Invoice
@@ -104,17 +106,26 @@ def executar() -> None:
     # so as divergencias) - o relatorio que o cliente abre. So le do banco;
     # roda mesmo que os fluxos acima tenham falhado.
     # ------------------------------------------------------------------
-    pipeline.rodar(6, "Painel", lambda: painel_flow(env))
+    pipeline.rodar(6, "Painel", lambda: painel_flow(config))
 
     # Heartbeat do agendamento: registra esta execução e projeta a próxima
     # pela cron. Antes do resumo() porque ele sai com código 1.
-    try:
-        conn = connect_db(env)
-        try:
-            registrar_heartbeat(conn, "pipeline", "erro" if pipeline.houve_erro else "ok")
-        finally:
-            conn.close()
-    except Exception as exc:
-        print(f" heartbeat não gravado: {exc}")
+    _gravar_heartbeat(config, pipeline.houve_erro)
 
     pipeline.resumo()
+
+
+def _gravar_heartbeat(config: Config, houve_erro: bool) -> None:
+    """Registra a execução em `agendamento`. Nunca levanta.
+
+    O heartbeat é contabilidade do agendador, não resultado do pipeline: se
+    ele falhar, os seis fluxos já rodaram e o RESUMO ainda tem que sair. Vive
+    numa função à parte porque aqui era um `try` dentro de outro `try` —
+    proibido pela governança — e o `try` de dentro só existia para o `close`,
+    que agora é o `with conexao`.
+    """
+    try:
+        with conexao(config.banco) as conn:
+            registrar_heartbeat(conn, "pipeline", "erro" if houve_erro else "ok")
+    except Exception:  # noqa: BLE001 — ver docstring
+        log.warning("controller: heartbeat nao gravado", exc_info=True)

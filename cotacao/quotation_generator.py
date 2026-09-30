@@ -10,10 +10,13 @@ from typing import NamedTuple
 
 import openpyxl
 
-from models.cotacao import QuotationPrice
-from utils.paths import OUTBOUND_DIR
+from domain.model.cotacao import QuotationPrice
+from commons.paths import OUTBOUND_DIR
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 _MONTH_NAMES = {
@@ -53,7 +56,7 @@ def _parse_price(raw) -> tuple[Decimal, str | None]:
     return Decimal("0"), raw_str
 
 
-def _current_month_sheet_name(ref_date: date | None = None) -> str:
+def current_month_sheet_name(ref_date: date | None = None) -> str:
     d = ref_date or date.today()
     return _MONTH_NAMES[d.month]
 
@@ -95,7 +98,7 @@ def create_initial_quotation_excel(
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = _current_month_sheet_name(ref_date)
+    ws.title = current_month_sheet_name(ref_date)
 
     ws.column_dimensions["A"].width = _COL_A_WIDTH
     ws.column_dimensions["B"].width = _COL_B_WIDTH
@@ -128,7 +131,7 @@ def create_initial_quotation_excel(
 
     wb.save(file_path)
     wb.close()
-    print(f"  OK: Excel criado: {file_path.name} ({row - 5} itens)")
+    log.info("OK: Excel criado: %s (%s itens)", file_path.name, row - 5)
     return file_path
 
 
@@ -143,7 +146,7 @@ def add_quotation_column(
     """
     wb = openpyxl.load_workbook(file_path)
 
-    sheet_name = _current_month_sheet_name(quote_date)
+    sheet_name = current_month_sheet_name(quote_date)
     if sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
     else:
@@ -183,8 +186,10 @@ def add_quotation_column(
     wb.close()
 
     supplier = ws.cell(row=3, column=2).value or file_path.stem
-    print(f"  OK: Coluna {get_column_letter(new_col)} ({quote_date.strftime('%d/%m/%Y')}) "
-          f"adicionada em {file_path.name}")
+    log.info(
+        "OK: Coluna %s (%s) adicionada em %s",
+        get_column_letter(new_col), quote_date.strftime('%d/%m/%Y'), file_path.name,
+    )
     return new_col
 
 

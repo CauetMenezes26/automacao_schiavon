@@ -15,14 +15,15 @@ Não há healthcheck aqui: o monitoramento é próprio do projeto — `dim_siste
 from __future__ import annotations
 
 from commons.logging_config import get_logger
+from domain.config import Config
 from domain.service import sistema_service
 
 log = get_logger(__name__)
 
 
-def monitor_flow(env: dict) -> None:
+def monitor_flow(config: Config) -> None:
     """Consolida o estado dos sistemas e abre/fecha alertas."""
-    sistema_service.verificar(env)
+    sistema_service.verificar(config)
 
 
 # Compat / uso direto.

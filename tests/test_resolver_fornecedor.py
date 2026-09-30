@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from conciliacao.reconcile_quote import (  # noqa: E402
     SUPPLIER_ERP_ONLY,
     SUPPLIER_UNMAPPED,
-    _reconcile_one_invoice,
+    reconcile_one_invoice,
     _resolver_fornecedor,
 )
 from domain.categorias import CategoriaFornecedor, eh_cotavel  # noqa: E402
@@ -136,7 +136,7 @@ def test_nota_de_papel_e_encaminhada_ao_erp_e_nao_tratada_como_erro():
     `conn=None` de proposito: a checagem acontece antes de qualquer ida ao
     banco, e o teste falha se alguem inverter essa ordem.
     """
-    resultado = _reconcile_one_invoice(
+    resultado = reconcile_one_invoice(
         None, _header("All Florida Paper, LLC"), [], ALIASES_COM_PAPEL,
     )
     cabecalho = resultado["header"]
@@ -159,7 +159,7 @@ def test_carne_segue_para_a_comparacao_por_cotacao():
     desviada para o ERP, a funcao retorna antes e este teste falha.
     """
     try:
-        resultado = _reconcile_one_invoice(
+        resultado = reconcile_one_invoice(
             None, _header("Prime Meats"), [], {"PRIME MEATS": _alias(6, "Prime Meats")},
         )
     except AttributeError:
@@ -175,7 +175,7 @@ def test_mercearia_de_nome_parecido_nao_entra_pelo_fuzzy():
     o de-para aproximado passasse a aceitar o par, a categoria impede que uma
     nota de mercearia seja comparada com cotacao de carne.
     """
-    resultado = _reconcile_one_invoice(
+    resultado = reconcile_one_invoice(
         None, _header("Prime Distribution USA"), [], ALIASES_COM_PAPEL,
     )
     codigos = resultado["header"]["issue_codes"]

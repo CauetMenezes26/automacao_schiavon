@@ -17,10 +17,15 @@ Não é healthcheck: é o mecanismo próprio do projeto.
 
 from __future__ import annotations
 
+from commons.exception import ConfigException
+from commons.logging_config import get_logger
 from domain import alertas as alr
+from domain.config import Config
 from domain import sistemas as sis
 from domain.service.agendamento_service import fluxos_atrasados
 from domain.service.processo_service import SCHEMA
+
+log = get_logger(__name__)
 
 __all__ = [
     "registrar_acesso", "abrir_alerta", "verificar", "checar_ambiente",
@@ -35,26 +40,22 @@ _DEST_PADRAO = "dataguvi@gmail.com"
 # dim_sistema — status de acesso in-place
 # ---------------------------------------------------------------------------
 
-def checar_ambiente(env: dict) -> None:
+def checar_ambiente(config: Config) -> None:
     """Preâmbulo: proxy barato de "dá para autenticar?" para cada sistema ativo
-    (env-vars presentes). O resultado real de login, durante os fluxos,
+    (credenciais do profile presentes). O resultado real de login, durante os fluxos,
     sobrescreve isto depois — aqui é o piso para sistemas que um dado run nem
     exercita."""
-    try:
-        from commons.db import connect_db
+    from commons.db import conexao
 
-        conn = connect_db(env)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠ monitor: sem conexão para checar ambiente ({exc})")
-        return
     try:
-        for sistema in sis.Sistema:
-            if str(sistema) not in sis.CRITICOS:
-                continue
-            ok, msg = sis.checar_env(sistema, env)
-            registrar_acesso(conn, sistema, ok=ok, mensagem=msg)
-    finally:
-        conn.close()
+        with conexao(config.banco) as conn:
+            for sistema in sis.Sistema:
+                if str(sistema) not in sis.CRITICOS:
+                    continue
+                ok, msg = config.checar_sistema(sistema)
+                registrar_acesso(conn, sistema, ok=ok, mensagem=msg)
+    except Exception as exc:  # noqa: BLE001 — preambulo nao derruba o pipeline
+        log.warning("monitor: sem conexao para checar ambiente (%s)", exc)
 
 
 def registrar_acesso(conn, sistema: sis.Sistema, ok: bool, mensagem: str | None = None) -> None:
@@ -80,7 +81,7 @@ def registrar_acesso(conn, sistema: sis.Sistema, ok: bool, mensagem: str | None 
 # ---------------------------------------------------------------------------
 
 def abrir_alerta(
-    conn, env: dict, tipo: alr.TipoAlerta, origem: str | None, mensagem: str,
+    conn, config: Config, tipo: alr.TipoAlerta, origem: str | None, mensagem: str,
 ) -> None:
     """Abre um alerta se ainda não houver um aberto para (tipo, chave_dedupe).
     Se abriu agora e nunca foi notificado, manda o e-mail e carimba
@@ -102,7 +103,7 @@ def abrir_alerta(
     if row is None:
         return  # já havia um aberto — não reenvia
 
-    enviado = _notificar(env, tipo, origem, mensagem)
+    enviado = _notificar(config, tipo, origem, mensagem)
     if enviado:
         with conn.cursor() as cur:
             cur.execute(
@@ -116,12 +117,12 @@ def abrir_alerta(
         conn.commit()
 
 
-def _notificar(env: dict, tipo: alr.TipoAlerta, origem: str | None, mensagem: str) -> bool:
+def _notificar(config: Config, tipo: alr.TipoAlerta, origem: str | None, mensagem: str) -> bool:
     """Manda o e-mail do alerta. Best-effort: se o SMTP não estiver configurado
     ou falhar, retorna False e o alerta segue aberto (retry no próximo run)."""
     from commons.email_client import enviar_email
 
-    destino = (env.get("ALERTA_EMAIL") or _DEST_PADRAO).strip()
+    destino = config.alerta_email or _DEST_PADRAO
     assunto = f"[RPA Schiavon] {tipo.descricao}" + (f" — {origem}" if origem else "")
     html = (
         f"<p><strong>{tipo.descricao}</strong></p>"
@@ -132,10 +133,10 @@ def _notificar(env: dict, tipo: alr.TipoAlerta, origem: str | None, mensagem: st
         f"não será reenviado.</p>"
     )
     try:
-        res = enviar_email(env, destino, assunto, html)
+        res = enviar_email(config.smtp, destino, assunto, html)
         return res.get("status") == "sent"
-    except EnvironmentError as exc:
-        print(f"  ⚠ alerta registrado, e-mail não enviado ({exc})")
+    except ConfigException as exc:
+        log.warning("monitor: alerta registrado, e-mail nao enviado - %s", exc)
         return False
 
 
@@ -161,57 +162,64 @@ def _resolver_alertas(conn, tipo: alr.TipoAlerta, chaves_ativas: list[str]) -> i
 # Entrypoint do FLUXO "Monitor"
 # ---------------------------------------------------------------------------
 
-def verificar(env: dict) -> None:
-    """Consolida o estado dos sistemas e abre/fecha alertas. Não levanta."""
+def verificar(config: Config) -> None:
+    """Consolida o estado dos sistemas e abre/fecha alertas. Não levanta.
+
+    Só a moldura: abre a conexão e garante o contrato de não levantar. A
+    consolidação em si está em `_consolidar`, porque aqui eram dois `try` na
+    mesma função (um para o connect, um para o `close`) — governança pede um.
+    """
+    from commons.db import conexao
+
+    try:
+        with conexao(config.banco) as conn:
+            _consolidar(conn, config)
+    except Exception as exc:  # noqa: BLE001 — contrato documentado: nao levanta
+        log.warning("monitor: consolidacao nao concluida (%s)", exc, exc_info=True)
+
+
+def _consolidar(conn, config: Config) -> None:
+    """Abre/fecha os alertas de acesso falho e de fluxo parado."""
     from psycopg2.extras import RealDictCursor
 
-    from utils.connection import connect_db
+    # --- sistemas críticos com acesso falho ---
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT codigo, ultimo_erro, ultimo_ok, ultima_mensagem
+              FROM {SCHEMA}.dim_sistema
+             WHERE ativo AND critico AND ultimo_erro IS NOT NULL
+               AND (ultimo_ok IS NULL OR ultimo_erro > ultimo_ok)
+            """
+        )
+        falhos = [dict(r) for r in cur.fetchall()]
 
-    try:
-        conn = connect_db(env)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  ⚠ monitor: sem conexão com o banco, pulando ({exc})")
-        return
+    chaves_login = []
+    for s in falhos:
+        chaves_login.append(alr.chave(alr.TipoAlerta.LOGIN_FALHA, s["codigo"]))
+        abrir_alerta(
+            conn, config, alr.TipoAlerta.LOGIN_FALHA, s["codigo"],
+            s["ultima_mensagem"] or "acesso falhou",
+        )
+    _resolver_alertas(conn, alr.TipoAlerta.LOGIN_FALHA, chaves_login)
 
-    try:
-        # --- sistemas críticos com acesso falho ---
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                f"""
-                SELECT codigo, ultimo_erro, ultimo_ok, ultima_mensagem
-                  FROM {SCHEMA}.dim_sistema
-                 WHERE ativo AND critico AND ultimo_erro IS NOT NULL
-                   AND (ultimo_ok IS NULL OR ultimo_erro > ultimo_ok)
-                """
-            )
-            falhos = [dict(r) for r in cur.fetchall()]
+    # --- pipeline / leitura parada ---
+    atrasados = fluxos_atrasados(conn, HORAS_SEM_LEITURA_ALERTA)
+    chaves_parado = []
+    for f in atrasados:
+        tipo = (alr.TipoAlerta.LEITURA_PARADA if f["fluxo"] in ("invoices", "sinonimos")
+                else alr.TipoAlerta.PIPELINE_PARADO)
+        chaves_parado.append(alr.chave(tipo, f["fluxo"]))
+        quando = f["ultima_exec"].strftime("%d/%m %H:%M") if f["ultima_exec"] else "nunca"
+        abrir_alerta(conn, config, tipo, f["fluxo"],
+                     f"fluxo '{f['fluxo']}' sem execução desde {quando} "
+                     f"(> {HORAS_SEM_LEITURA_ALERTA}h)")
+    for tipo in (alr.TipoAlerta.PIPELINE_PARADO, alr.TipoAlerta.LEITURA_PARADA):
+        _resolver_alertas(conn, tipo,
+                          [c for c in chaves_parado if c.startswith(str(tipo))])
 
-        chaves_login = []
-        for s in falhos:
-            chaves_login.append(alr.chave(alr.TipoAlerta.LOGIN_FALHA, s["codigo"]))
-            abrir_alerta(
-                conn, env, alr.TipoAlerta.LOGIN_FALHA, s["codigo"],
-                s["ultima_mensagem"] or "acesso falhou",
-            )
-        _resolver_alertas(conn, alr.TipoAlerta.LOGIN_FALHA, chaves_login)
-
-        # --- pipeline / leitura parada ---
-        atrasados = fluxos_atrasados(conn, HORAS_SEM_LEITURA_ALERTA)
-        chaves_parado = []
-        for f in atrasados:
-            tipo = (alr.TipoAlerta.LEITURA_PARADA if f["fluxo"] in ("invoices", "sinonimos")
-                    else alr.TipoAlerta.PIPELINE_PARADO)
-            chaves_parado.append(alr.chave(tipo, f["fluxo"]))
-            quando = f["ultima_exec"].strftime("%d/%m %H:%M") if f["ultima_exec"] else "nunca"
-            abrir_alerta(conn, env, tipo, f["fluxo"],
-                         f"fluxo '{f['fluxo']}' sem execução desde {quando} "
-                         f"(> {HORAS_SEM_LEITURA_ALERTA}h)")
-        for tipo in (alr.TipoAlerta.PIPELINE_PARADO, alr.TipoAlerta.LEITURA_PARADA):
-            _resolver_alertas(conn, tipo,
-                              [c for c in chaves_parado if c.startswith(str(tipo))])
-
-        abertos = len(falhos) + len(atrasados)
-        print(f"  ✓ monitor: {abertos} alerta(s) aberto(s), "
-              f"{len(falhos)} sistema(s) com acesso falho")
-    finally:
-        conn.close()
+    abertos = len(falhos) + len(atrasados)
+    log.info(
+        "monitor: %s alerta(s) aberto(s), %s sistema(s) com acesso falho",
+        abertos, len(falhos),
+    )

@@ -14,7 +14,7 @@ vocabulário, sem nada garantindo que combinam.
 `issue_codes` é a lista **crua** do que a linha (ou a nota) acumulou:
 `['handwritten_present', 'price_above_quote']` é uma divergência de preço numa
 nota que também tem anotação à mão. O `cod_status` continua sendo o **veredito
-único** derivado dessa lista (`_veredito` em `conciliacao_db.py`); os dois
+único** derivado dessa lista (`_status_conciliacao` em `conciliacao_service.py`); os dois
 convivem — a lista para o painel destrinchar o motivo, o código para agrupar.
 
 `IssueCode` é `StrEnum`: cada membro **é** a sua string, então as comparações com
@@ -29,6 +29,7 @@ __all__ = [
     "IssueCode",
     "MARCAS_REVISAO",
     "VEREDITO_PRECO",
+    "VEREDITO_ERP",
 ]
 
 
@@ -45,11 +46,22 @@ class IssueCode(StrEnum):
     SUPPLIER_ERP_ONLY = "supplier_erp_only"        # não-carne: comparação é a do ERP
     NO_QUOTE_FOR_SUPPLIER = "no_quote_for_supplier"  # sem cotação no ciclo
 
+    # --- exclusão (nível da nota) — não é divergência, é decisão de não comparar
+    SKIPPED_INSUMO_ANNOTATION = "skipped_insumo_annotation"  # anotação à mão com "insumo"
+
+    # --- busca no Catapult (nível da nota) — a busca por fornecedor não achou nada
+    PO_NAO_ENCONTRADA = "po_nao_encontrada"  # busca por fornecedor não devolveu PO nenhum
+
     # --- preço (nível da linha) — estes viram veredito
     NO_QUOTE_FOR_ITEM = "no_quote_for_item"        # item da nota sem par na cotação
     UNIT_MISMATCH = "unit_mismatch"                # preço por caixa x por libra
     PRICE_ABOVE_QUOTE = "price_above_quote"        # faturado acima do cotado
     PRICE_BELOW_QUOTE = "price_below_quote"        # faturado abaixo do cotado
+
+    # --- comparação contra o PO do Catapult (nível da linha) — comparacao='erp'
+    NO_PO_FOR_ITEM = "no_po_for_item"              # item da nota sem par no PO
+    QTY_MISMATCH_PO = "qty_mismatch_po"            # invoice x Ordered x Received divergem
+    PRICE_MISMATCH_PO = "price_mismatch_po"        # valor da linha x Invoiced Total Cost diverge
 
     # --- qualidade da leitura (nível da linha) — ligam `revisar`, não o veredito
     LOW_VISION_CONFIDENCE = "low_vision_confidence"  # confiança da leitura abaixo do piso
@@ -65,10 +77,15 @@ _DESCRICAO: dict[IssueCode, str] = {
     IssueCode.SUPPLIER_FUZZY_MATCH: "Fornecedor casou por aproximação — conferir.",
     IssueCode.SUPPLIER_ERP_ONLY: "Fornecedor não-carne: a comparação dele é contra o ERP.",
     IssueCode.NO_QUOTE_FOR_SUPPLIER: "Fornecedor sem cotação no ciclo da nota.",
+    IssueCode.SKIPPED_INSUMO_ANNOTATION: "Nota com anotação à mão de insumo — não enviada ao Catapult.",
+    IssueCode.PO_NAO_ENCONTRADA: "Busca por fornecedor no Catapult não devolveu PO nenhum.",
     IssueCode.NO_QUOTE_FOR_ITEM: "Item da nota sem par no lado cotado.",
     IssueCode.UNIT_MISMATCH: "Preço por caixa não compara com preço por libra.",
     IssueCode.PRICE_ABOVE_QUOTE: "Faturado acima do cotado, além da tolerância.",
     IssueCode.PRICE_BELOW_QUOTE: "Faturado abaixo do cotado, além da tolerância.",
+    IssueCode.NO_PO_FOR_ITEM: "Item da nota sem par no PO do Catapult.",
+    IssueCode.QTY_MISMATCH_PO: "Quantidade faturada não bate com Ordered/Received do PO.",
+    IssueCode.PRICE_MISMATCH_PO: "Valor da linha não bate com o Invoiced Total Cost do PO.",
     IssueCode.LOW_VISION_CONFIDENCE: "Leitura do PDF abaixo do piso de confiança.",
     IssueCode.HANDWRITTEN_PRESENT: "Linha com anotação à mão na nota.",
 }
@@ -82,10 +99,17 @@ MARCAS_REVISAO: frozenset[str] = frozenset({
 })
 
 # Códigos que produzem um veredito de preço (ordem de precedência fica no
-# _veredito de conciliacao_db.py). Aqui só para documentar o grupo.
+# _status_conciliacao de conciliacao_service.py). Aqui só para documentar o grupo.
 VEREDITO_PRECO: frozenset[str] = frozenset({
     IssueCode.NO_QUOTE_FOR_ITEM,
     IssueCode.UNIT_MISMATCH,
     IssueCode.PRICE_ABOVE_QUOTE,
     IssueCode.PRICE_BELOW_QUOTE,
+})
+
+# Mesmo papel de VEREDITO_PRECO, para a comparação contra o PO (comparacao='erp').
+VEREDITO_ERP: frozenset[str] = frozenset({
+    IssueCode.NO_PO_FOR_ITEM,
+    IssueCode.QTY_MISMATCH_PO,
+    IssueCode.PRICE_MISMATCH_PO,
 })

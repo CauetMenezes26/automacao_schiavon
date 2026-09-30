@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from commons.db import connect_db
+from commons.db import conexao
 from commons.exception import (
     BusinessException,
     ConfigException,
@@ -23,20 +23,20 @@ from commons.exception import (
 from commons.logging_config import get_logger
 from commons.paths import PAINEL_XLSX
 from crawler.reports.painel_excel import gerar_relatorio
+from domain.config import Config
 from domain.service import conciliacao_service
 
 log = get_logger(__name__)
 
 
-def painel_flow(env: dict) -> None:
+def painel_flow(config: Config) -> None:
     """Gera o snapshot da semana corrente em `PAINEL_XLSX`."""
-    conn = None
     try:
         log.info("painel - iniciando")
-        conn = connect_db(env)
-        inicio, fim = _semana_atual()
-        gerado_em = datetime.now()
-        dados = _coletar_dados(conn, inicio, fim)
+        with conexao(config.banco) as conn:
+            inicio, fim = _semana_atual()
+            gerado_em = datetime.now()
+            dados = _coletar_dados(conn, inicio, fim)
         _gravar_excel(dados, gerado_em, inicio, fim)
         log.info("painel - fim - arquivo: %s", PAINEL_XLSX.name)
     except BusinessException as exc:
@@ -45,8 +45,6 @@ def painel_flow(env: dict) -> None:
         log.exception("painel - abortado")
     except Exception:
         log.exception("painel - erro nao classificado")
-    finally:
-        _fechar(conn)
 
 
 def _semana_atual(hoje: date | None = None) -> tuple[date, date]:
@@ -75,11 +73,3 @@ def _gravar_excel(dados: dict, gerado_em: datetime, inicio: date, fim: date) -> 
     except OSError as exc:
         raise CrawlerException("painel - falha ao gravar planilha") from exc
 
-
-def _fechar(conn) -> None:
-    if conn is None:
-        return
-    try:
-        conn.close()
-    except Exception:
-        log.warning("painel - falha ao fechar conexao", exc_info=True)

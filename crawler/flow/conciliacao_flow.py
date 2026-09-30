@@ -15,19 +15,24 @@ from __future__ import annotations
 
 from datetime import date
 
-from commons.db import connect_db
+from commons.datas import week_bounds
+from commons.db import connect_db, fechar
 from commons.exception import BusinessException
 from commons.logging_config import get_logger
+from commons.sharepoint import last_week_reference
+from commons.sheets import SheetsError
+from conciliacao.pendentes_sinonimo import extrair_pendentes, sincronizar_pendentes
 from conciliacao.reconcile_quote import (
     NO_QUOTE_FOR_SUPPLIER,
     SUPPLIER_ERP_ONLY,
     SUPPLIER_FUZZY_MATCH,
     SUPPLIER_UNMAPPED,
-    _reconcile_one_invoice,
-    _week_bounds,
+    reconcile_one_invoice,
 )
-from domain.enums import EtapaEnum as Etapa, StatusExecEnum as Status
+from domain.config import Config
+from domain.enums import Etapa, StatusExecucao as Status
 from domain.service import processo_service as proc
+from domain.service import sistema_service
 from domain.service.conciliacao_service import (
     fetch_invoice_headers_for_reconciliation,
     fetch_invoice_headers_reprocesso,
@@ -36,45 +41,40 @@ from domain.service.conciliacao_service import (
     fetch_supplier_aliases,
     save_reconciliation_header,
     save_reconciliation_items,
-    update_invoice_fornecedor,
 )
+from domain.sistemas import Sistema
 
 log = get_logger(__name__)
 
 
 def conciliacao_flow(
-    env: dict[str, str],
+    config: Config,
     date_from: date | None = None,
     date_to: date | None = None,
     supplier: str | None = None,
 ) -> dict:
     """Roda a conciliação do período e grava o resultado. Retorna os totais."""
     if date_from is None or date_to is None:
-        # inicio, fim = _week_bounds(date.today())  # MOCK TEMPORÁRIO: voltar esta linha depois do teste
-        # MOCK: cobre as duas semanas de teste (notas de 19/06 e de 25-26/06) —
-        # voltar para a linha acima (date.today()) depois de aprovar o teste.
-        inicio, fim = date(2026, 6, 25), date(2026, 6, 28)
+        # TESTE: semana passada (dia 14) — mesmo período do FLUXO 2
+        # (crawler/flow/invoices_flow.py). Voltar para `week_bounds(date.today())`
+        # quando sair de teste.
+        inicio, fim = week_bounds(last_week_reference(date.today()))
         date_from = date_from or inicio
         date_to = date_to or fim
 
-    conn = connect_db(env)
+    conn = connect_db(config.banco)
     try:
 
-        print(f"\n{'='*60}")
-        print(f"Conciliação Cotação x Invoice — {date_from} a {date_to}"
-              + (f"  [fornecedor: {supplier}]" if supplier else ""))
-        print(f"{'='*60}")
+        log.info("conciliacao cotacao x invoice - %s a %s%s", date_from, date_to,
+                 f" [fornecedor: {supplier}]" if supplier else "")
 
         aliases = fetch_supplier_aliases(conn, source="invoice")
         if not aliases:
-            print("  ⚠ supplier_alias vazia — rode "
-                  "'python -m cotacao.seed_supplier_alias' e aprove o CSV.")
+            log.warning("supplier_alias vazia - rode 'python -m cotacao.seed_supplier_alias' e aprove o CSV.")
 
         sinonimos = fetch_item_sinonimos(conn)
         if not sinonimos:
-            print("  ⚠ dim_item_sinonimo vazia — o match de item vai sobre texto "
-                  "cru. Rode 'python -m manutencao.seed_item_sinonimos --aplicar' "
-                  "ou deixe files/sinonimos/DE_PARA_ITENS.xlsx no lugar.")
+            log.warning("dim_item_sinonimo vazia - o match de item vai sobre texto cru. Confira se SINONIMOS_SHEET_ID esta no .config e se a aba 'De-Para' da planilha tem conteudo.")
 
         headers = fetch_invoice_headers_for_reconciliation(
             conn, date_from, date_to, supplier,
@@ -87,16 +87,16 @@ def conciliacao_flow(
                           if h["id"] not in vistos]
             if remarcadas:
                 headers += remarcadas
-                print(f"  + {len(remarcadas)} nota(s) remarcada(s) para reprocesso")
+                log.info("+ %s nota(s) remarcada(s) para reprocesso", len(remarcadas))
 
         if not headers:
-            print("  Nenhuma invoice no período.")
+            log.info("Nenhuma invoice no periodo.")
             return {"headers_total": 0}
 
         items_by_header = fetch_invoice_items_by_headers(conn, [h["id"] for h in headers])
-        print(f"  {len(headers)} invoice(s) a conciliar")
+        log.info("%s invoice(s) a conciliar", len(headers))
 
-
+        sheet_id = config.sinonimos_sheet_id or None
         totais = {
             "headers_total": 0, "headers_issue": 0,
             "items_total": 0, "items_issue": 0, "quote_items_unused": 0,
@@ -108,7 +108,7 @@ def conciliacao_flow(
         maiores: list[tuple] = []
 
         for header in headers:
-            resultado = _reconcile_one_invoice(
+            resultado = reconcile_one_invoice(
                 conn, header, items_by_header.get(header["id"], []), aliases, sinonimos,
             )
             codigos = resultado["header"]["issue_codes"]
@@ -127,10 +127,10 @@ def conciliacao_flow(
                     f"nome '{header.get('supplier_name')}' não casou com nenhum alias")
                 continue
 
-            # Fornecedor resolvido: grava em fat_invoice e conclui a etapa 13,
-            # antes de qualquer desfecho (carne ou ERP-only).
+            # Fornecedor resolvido: conclui a etapa 13, antes de qualquer
+            # desfecho (carne ou ERP-only). `fat_invoice.id_fornecedor` nao existe
+            # mais, entao nada e gravado na invoice.
             if id_forn:
-                update_invoice_fornecedor(conn, header["id"], id_forn)
                 proc.concluir_etapa(
                     conn, header["id_processo"], Etapa.IDENTIFICAR_FORNECEDOR)
 
@@ -156,11 +156,14 @@ def conciliacao_flow(
 
             if NO_QUOTE_FOR_SUPPLIER in codigos:
                 totais["sem_cotacao"] += 1
-                print(f"  ⚠ {header['supplier_name'][:38]:<40} "
-                      f"{header['invoice_date']}  sem cotação no ciclo")
+                log.warning(
+                    "%-40s %s sem cotacao no ciclo",
+                    header['supplier_name'][:38], header['invoice_date'],
+                )
                 continue
 
             save_reconciliation_items(conn, recon_header_id, resultado["items"])
+            _sincronizar_pendentes(resultado["header"], resultado["items"], sheet_id, totais)
             cotados.update(resultado["quote_lines"])
             usados.update(r["id_price_quote"] for r in resultado["items"]
                           if r.get("id_price_quote"))
@@ -178,51 +181,80 @@ def conciliacao_flow(
                                     float(r["price_diff_pct"])))
 
             status = "✗" if com_issue else "✓"
-            print(f"  {status} {resultado['header']['supplier_canonical'][:22]:<24} "
-                  f"{header['invoice_date']}  nº {str(header['invoice_number'])[:12]:<14} "
-                  f"{len(resultado['items']):>3} item(ns), {com_issue} com diferença")
+            log.info(
+                "%s %-24s %s no %-14s %3s item(ns), %s com diferenca",
+                status, resultado['header']['supplier_canonical'][:22], header['invoice_date'], str(header['invoice_number'])[:12], len(resultado['items']), com_issue,
+            )
 
         totais["quote_items_unused"] = len(cotados - usados)
         # sem rodada para fechar: o historico de execucao mora em `processo`
 
-        print(f"\n{'-'*60}")
-        print(f"  Invoices conciliadas   : {totais['headers_total']}")
-        print(f"    com alguma pendência : {totais['headers_issue']}")
-        print(f"    fornecedor por aproximação (conferir): {totais['por_aproximacao']}")
-        print(f"  Itens comparados       : {totais['items_total']}")
-        print(f"    com pendência        : {totais['items_issue']}")
-        print(f"  Cotados e não faturados: {totais['quote_items_unused']}")
-        print(f"  Sem cotação no ciclo   : {totais['sem_cotacao']}")
+        if totais.get("sheets_tentativas"):
+            sem_erro = not totais.get("sheets_erro")
+            sistema_service.registrar_acesso(
+                conn, Sistema.GOOGLE_SHEETS, ok=sem_erro,
+                mensagem=None if sem_erro else
+                f"{totais['sheets_erro']} falha(s) sincronizando pendentes",
+            )
+
+        log.info("Invoices conciliadas : %s", totais['headers_total'])
+        log.info("com alguma pendencia : %s", totais['headers_issue'])
+        log.info("fornecedor por aproximacao (conferir): %s", totais['por_aproximacao'])
+        log.info("Itens comparados : %s", totais['items_total'])
+        log.info("com pendencia : %s", totais['items_issue'])
+        log.info("Cotados e nao faturados: %s", totais['quote_items_unused'])
+        log.info("Sem cotacao no ciclo : %s", totais['sem_cotacao'])
         # Estas duas não são perda: nota não-carne se concilia contra o ERP, e
         # é lá que ela vai ser comparada. Só não é AQUI.
-        print(f"\n  Não entram nesta comparação (seguem para o ERP):")
-        print(f"    fornecedor não-carne : {totais['para_o_erp']}")
-        print(f"    fornecedor sem cadastro: {totais['sem_fornecedor']}")
+        log.info("Nao entram nesta comparacao (seguem para o ERP):")
+        log.info("fornecedor nao-carne : %s", totais['para_o_erp'])
+        log.info("fornecedor sem cadastro: %s", totais['sem_fornecedor'])
 
         if maiores:
             maiores.sort(reverse=True)
-            print(f"\n  --- 10 maiores diferenças ---")
-            print(f"  {'FORNECEDOR':<20}{'INV':>9}{'COTACAO':>9}{'DIF%':>8}  ITEM")
+            log.info("--- 10 maiores diferencas ---")
+            log.info("%-20s%9s%9s%8s ITEM", 'FORNECEDOR', 'INV', 'COTACAO', 'DIF%')
             for _, forn, desc, cot, p_inv, p_cot, pct in maiores[:10]:
-                print(f"  {str(forn)[:18]:<20}{float(p_inv):>9.2f}{float(p_cot):>9.2f}"
-                      f"{pct:>7.1f}%  {str(desc)[:40]}")
-                print(f"  {'':<20}{'':>9}{'':>9}{'':>8}  -> {str(cot)[:40]}")
+                log.info(
+                    "%-20s%9.2f%9.2f%7.1f%% %s",
+                    str(forn)[:18], float(p_inv), float(p_cot), pct, str(desc)[:40],
+                )
+                log.info("%-20s%9s%9s%8s -> %s", '', '', '', '', str(cot)[:40])
 
-        print(f"{'='*60}\n")
         return totais
 
     except BusinessException as exc:
         log.warning("conciliacao: caso de negocio - %s", exc)
         return {"headers_total": 0, "erro_negocio": str(exc)}
     finally:
-        _fechar(conn)
+        fechar(conn)
 
 
-def _fechar(conn) -> None:
+def _sincronizar_pendentes(
+    header: dict, items: list[dict], sheet_id: str | None, totais: dict,
+) -> None:
+    """Registra na aba `Pendentes` os itens desta nota sem par na cotação.
+
+    Secundário ao resultado principal: nunca propaga. Mesmo padrão de
+    `crawler/flow/reconcile_erp_flow.py::_sincronizar_pendentes` — o acesso
+    agregado ao Sheets é registrado uma vez só, no fim do fluxo.
+    """
+    if not sheet_id:
+        return
     try:
-        conn.close()
-    except Exception:  # noqa: BLE001
-        log.warning("conciliacao: falha ao fechar conexao", exc_info=True)
+        pendentes = extrair_pendentes(
+            items, header["supplier_canonical"], "cotacao",
+            header.get("invoice_date") or date.today(),
+        )
+        n = sincronizar_pendentes(sheet_id, pendentes)
+        totais["sheets_tentativas"] = totais.get("sheets_tentativas", 0) + 1
+        if n:
+            log.info("(%s pendencia(s) nova(s) na aba Pendentes)", n)
+    except SheetsError as exc:
+        totais["sheets_tentativas"] = totais.get("sheets_tentativas", 0) + 1
+        totais["sheets_erro"] = totais.get("sheets_erro", 0) + 1
+        log.warning("falha sincronizando pendentes no Sheets: %s", exc)
+
 
 
 # Compat: nome antigo da fachada.

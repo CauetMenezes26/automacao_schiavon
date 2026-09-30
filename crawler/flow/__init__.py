@@ -1,4 +1,4 @@
-"""Fluxos do pipeline. Um modulo por fluxo: `<nome>_flow.py` expoe `<nome>_flow(env)`.
+"""Fluxos do pipeline. Um modulo por fluxo: `<nome>_flow.py` expoe `<nome>_flow(config)`.
 
 Contrato (ver `.cursor/rules/templates-rpa.mdc`, `tratamento-erro.mdc`,
 `monitoramento.mdc`):

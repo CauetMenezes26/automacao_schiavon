@@ -1,10 +1,14 @@
 """Polling de respostas Twilio e tratamento de ausências por ciclo."""
 
 import json
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from commons.messaging.twilio_config import Twilio
+
+from commons.exception import ConfigException
+from commons.messaging.twilio_config import ConfigTwilio, Twilio
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
 
 PROCESSED_MESSAGES_REGISTRY = Path(__file__).resolve().parent.parent / "files" / "processed_twilio_messages.json"
 
@@ -50,7 +54,7 @@ def _save_processed_message_sid(message_sid: str) -> None:
 # Polling de respostas da Twilio — ausência por ciclo
 # ---------------------------------------------------------------------------
 
-def check_twilio_absences(conn) -> int:
+def check_twilio_absences(conn, twilio: ConfigTwilio) -> int:
     """
     Busca respostas de 'Ausente esta Semana' recebidas na Twilio nas últimas 24h.
     Marca o quotation_response do ciclo aberto como 'ausente' (por ciclo, não permanente).
@@ -63,34 +67,34 @@ def check_twilio_absences(conn) -> int:
         update_quotation_response_ausente,
     )
 
-    twilio_client = Twilio.returnClient()
-    twilio_number_raw = os.getenv("TWILIO_NUMBER")
+    twilio_client = Twilio.returnClient(twilio)
+    twilio_number_raw = twilio.numero
 
     if not twilio_number_raw:
-        raise EnvironmentError("Variável de ambiente TWILIO_NUMBER não configurada no .env.")
+        raise ConfigException("Chave TWILIO_NUMBER não configurada no profile.")
 
     twilio_number = twilio_number_raw.replace("whatsapp:", "").replace("+", "").strip()
 
     open_request = fetch_open_quotation_request(conn)
     if not open_request:
-        print("Nenhum ciclo de cotação aberto. Nada a processar.")
+        log.info("Nenhum ciclo de cotacao aberto. Nada a processar.")
         return 0
 
     phone_map = fetch_sent_responses_by_supplier_phone(conn, open_request["id"])
 
-    print(f"  Fornecedores no ciclo (últimos 9 dígitos): {list(phone_map.keys())}")
+    log.info("Fornecedores no ciclo (ultimos 9 digitos): %s", list(phone_map.keys()))
 
     time_cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
 
     twilio_to = f"whatsapp:+{twilio_number}"
-    print(f"  Consultando mensagens recebidas na Twilio (to={twilio_to})...")
+    log.info("Consultando mensagens recebidas na Twilio (to=%s)...", twilio_to)
     twilio_message_list = twilio_client.messages.list(
         to=twilio_to,
         date_sent_after=time_cutoff_24h,
     )
 
     received_client_messages = [msg for msg in twilio_message_list if msg.direction == "inbound"]
-    print(f"  Total de mensagens inbound no período: {len(received_client_messages)}")
+    log.info("Total de mensagens inbound no periodo: %s", len(received_client_messages))
 
     already_processed_sids = _load_processed_message_sids()
     ausente_count = 0
@@ -103,21 +107,26 @@ def check_twilio_absences(conn) -> int:
         sender_phone = message.from_.replace("whatsapp:", "").replace("+", "")
         sender_local = _extract_local_digits(sender_phone)
 
-        print(f"  MSG de {sender_local}: \"{received_text[:60]}\" (SID: {message.sid})")
+        log.info("MSG de %s: %r (SID: %s)",
+                 sender_local, received_text[:60], message.sid)
 
         if "ausente" in received_text.lower():
             response_data = phone_map.get(sender_local)
             if response_data:
                 update_quotation_response_ausente(conn, response_data["id"])
-                print(f"  OK: {response_data['supplier_name']} marcado como ausente "
-                      f"no ciclo {open_request['week_label']}")
+                log.info(
+                    "OK: %s marcado como ausente no ciclo %s",
+                    response_data['supplier_name'], open_request['week_label'],
+                )
                 ausente_count += 1
                 _save_processed_message_sid(message.sid)
             else:
-                print(f"  ? Número {sender_phone} (local={sender_local}) "
-                      f"não encontrado no mapa de fornecedores")
+                log.info(
+                    "? Numero %s (local=%s) nao encontrado no mapa de fornecedores",
+                    sender_phone, sender_local,
+                )
 
     if ausente_count == 0:
-        print("  Nenhuma nova ausência identificada nesta execução.")
+        log.info("Nenhuma nova ausencia identificada nesta execucao.")
 
     return ausente_count

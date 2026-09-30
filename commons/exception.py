@@ -8,7 +8,7 @@ ela:
     ├── CrawlerException         erro TÉCNICO do robô / infraestrutura
     │   ├── IntegracaoException  falha de sistema externo (API, SharePoint, SMTP)
     │   └── DataAccessException  falha ao ler/gravar no banco
-    └── ConfigException          configuração ausente ou inválida (.env / profile)
+    └── ConfigException          configuração ausente ou inválida (profile)
 
 Impacto (ver `.cursor/rules/tratamento-erro.mdc` e `monitoramento.mdc`):
 

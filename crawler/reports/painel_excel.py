@@ -46,17 +46,16 @@ _BORDA = Border(top=_LINHA, bottom=_LINHA, left=_LINHA, right=_LINHA)
 _DINHEIRO = '"$"#,##0.0000'
 _DINHEIRO_TOTAL = '"$"#,##0.00'
 
-# Rótulo e cor por `fat_conciliacao_item.cod_status` (StatusConciliacaoEnum:
-# CONFERIDO=0, PRECO_ACIMA=10, PRECO_ABAIXO=11, SEM_REFERENCIA_ITEM=20,
-# UNIDADE_DIVERGENTE=21). CONFERIDO sai como "Conciliado": no relatório do
-# cliente o que importa é que a linha fechou contra a cotação, e "conferido"
-# sugeria conferência humana. As duas abas usam o mesmo mapa.
+# Rótulo e cor por `fat_conciliacao_item.cod_status` (StatusConciliacao:
+# CONFERIDO=0, DIVERGENCIA=12, SEM_REFERENCIA_ITEM=20). CONFERIDO sai como
+# "Conciliado": no relatório do cliente o que importa é que a linha fechou
+# contra o PO, e "conferido" sugeria conferência humana. As duas abas usam
+# o mesmo mapa. 10/11 (antigo acima/abaixo do cotado) ficaram sem entrada
+# de propósito — a comparação que os emitia não roda mais (domain/enums.py).
 _STATUS = {
     0: ("Conciliado", _VERDE_FUNDO, _VERDE_TEXTO),
-    10: ("Acima do cotado", _VERMELHO_FUNDO, _VERMELHO_TEXTO),
-    11: ("Abaixo do cotado", _VERMELHO_FUNDO, _VERMELHO_TEXTO),
-    20: ("Item nao achado na cotacao", _AMBAR_FUNDO, _AMBAR_TEXTO),
-    21: ("Unidade divergente", _AMBAR_FUNDO, _AMBAR_TEXTO),
+    12: ("Divergente do PO", _VERMELHO_FUNDO, _VERMELHO_TEXTO),
+    20: ("Item nao achado no PO", _AMBAR_FUNDO, _AMBAR_TEXTO),
 }
 
 
