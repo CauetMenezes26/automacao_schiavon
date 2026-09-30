@@ -3,6 +3,14 @@
 Recolhe o padrao que ja estava repetido em todo o projeto - print("="*60),
 titulo, print("="*60) - para que as etapas imprimam do mesmo jeito e o
 `main.py` consiga numerar os fluxos.
+
+**Este e o unico modulo que imprime de proposito.** Os `print` daqui (e o
+RESUMO de `crawler/reports/execution_report.py`, que usa estas funcoes) sao
+APRESENTACAO: a moldura que o operador le no terminal, com regua alinhada e
+numeracao de fluxo. Nao sao diagnostico, e por isso nao passam pelo
+`logging` - passar tornaria o layout ilegivel (prefixo de data/nivel em cada
+regua) e duplicaria tudo no arquivo de log. Mensagem de diagnostico, mesmo
+que va para o console, usa `commons/logging_config.get_logger`.
 """
 from __future__ import annotations
 import sys

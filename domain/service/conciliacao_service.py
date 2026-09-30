@@ -20,7 +20,9 @@ histórico de execução, que era o único ganho do run, mora em `processo`.
 `issue_codes` (lista de texto) virou `cod_status` + `revisar`. A lista misturava
 veredito de preço com sinalização de qualidade — `['handwritten_present',
 'price_above_quote']` é uma divergência de preço numa nota que também tem
-anotação à mão, e são coisas de naturezas diferentes.
+anotação à mão, e são coisas de naturezas diferentes. Em `fat_conciliacao`
+(header) `revisar` foi removida do banco depois — só `fat_conciliacao_item`
+ainda tem a coluna; no header sobra só `cod_status`/`status_conc` como veredito.
 """
 
 from __future__ import annotations
@@ -30,38 +32,58 @@ from typing import TYPE_CHECKING
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from commons.db import reverter
 from commons.exception import DataAccessException
 from domain.conciliacao_codes import MARCAS_REVISAO, IssueCode
-from domain.enums import StatusConciliacaoEnum as Veredito, StatusExecEnum
+from domain.enums import StatusConciliacao as Veredito, StatusExecucao
 from domain.service.processo_service import SCHEMA
 
 # Marca de "reconciliar de novo" — o valor é do enum, não literal solto.
-_REPROC = StatusExecEnum.REPROCESSAR_CONCILIACAO
+_REPROC = StatusExecucao.REPROCESSAR_CONCILIACAO
 _REPROC_SET = f"cod_status = {int(_REPROC)}, status_exec = '{_REPROC.name}'"
 
 if TYPE_CHECKING:
     from conciliacao.sinonimos import Sinonimo
 
 
-def _veredito(codes: list[str] | None) -> Veredito:
+def _status_conciliacao(codes: list[str] | None) -> Veredito:
     """Traduz a lista de códigos no veredito único da linha.
 
     Ordem de precedência: não dá para comparar > diverge > confere.
+    `StatusConciliacao` não reserva mais ACIMA/ABAIXO/UNIDADE_DIVERGENTE
+    (eram só da comparação contra cotação, que não roda mais — ver
+    `domain/enums.py`); os `IssueCode` de cotação continuam aqui só como
+    rede de segurança caso `conciliacao_flow.py`/`reconcile_quote.py`
+    (desativados, mas ainda no repo) rodem de novo algum dia — nesse caso
+    caem no mesmo DIVERGENCIA genérico do PO, sem distinguir direção.
     """
     codes = codes or []
-    if "no_quote_for_item" in codes:
+    if IssueCode.SKIPPED_INSUMO_ANNOTATION in codes:
+        return Veredito.NAO_COMPARADO
+    if (IssueCode.NO_QUOTE_FOR_ITEM in codes or IssueCode.NO_PO_FOR_ITEM in codes
+            or IssueCode.PO_NAO_ENCONTRADA in codes):
         return Veredito.SEM_REFERENCIA_ITEM
-    if "unit_mismatch" in codes:
-        return Veredito.UNIDADE_DIVERGENTE
-    if "price_above_quote" in codes:
-        return Veredito.PRECO_ACIMA
-    if "price_below_quote" in codes:
-        return Veredito.PRECO_ABAIXO
+    if (IssueCode.QTY_MISMATCH_PO in codes or IssueCode.PRICE_MISMATCH_PO in codes
+            or IssueCode.UNIT_MISMATCH in codes or IssueCode.PRICE_ABOVE_QUOTE in codes
+            or IssueCode.PRICE_BELOW_QUOTE in codes):
+        return Veredito.DIVERGENCIA
     return Veredito.CONFERIDO
 
 
 def _revisar(codes: list[str] | None, needs_review: bool) -> bool:
     return bool(needs_review) or bool(MARCAS_REVISAO & set(codes or []))
+
+
+def _ler(conn, sql: str, params, contexto: str) -> list[dict]:
+    """SELECT que devolve as linhas como `dict`. Erro do driver vira
+    `DataAccessException` (com rollback), como nas gravacoes deste modulo."""
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+    except psycopg2.Error as exc:
+        reverter(conn)
+        raise DataAccessException(f"falha ao ler {contexto}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -76,20 +98,47 @@ def fetch_supplier_aliases(conn, source: str = "invoice") -> dict[str, dict]:
     não ter alias cadastrado, e isso deixou de bastar quando o de-para passou a
     casar por aproximação.
     """
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            f"""
-            SELECT a.alias_norm,
-                   a.id_fornecedor AS canonical_id,
-                   f.nome          AS canonical_name,
-                   f.categoria
-              FROM {SCHEMA}.dim_fornecedor_alias a
-              JOIN {SCHEMA}.dim_fornecedor       f ON f.id = a.id_fornecedor
-             WHERE a.origem = %s AND a.ativo
-            """,
-            (source,),
-        )
-        return {r["alias_norm"]: dict(r) for r in cur.fetchall()}
+    rows = _ler(
+        conn,
+        f"""
+        SELECT a.alias_norm,
+               a.id_fornecedor AS canonical_id,
+               f.nome          AS canonical_name,
+               f.categoria
+          FROM {SCHEMA}.dim_fornecedor_alias a
+          JOIN {SCHEMA}.dim_fornecedor       f ON f.id = a.id_fornecedor
+         WHERE a.origem = %s AND a.ativo
+        """,
+        (source,), "aliases de fornecedor",
+    )
+    return {r["alias_norm"]: r for r in rows}
+
+
+def fetch_erp_search_terms(conn) -> dict[str, str]:
+    """Mapa `alias_norm` (lado invoice) → texto do nome no Catapult
+    (`dim_fornecedor_alias.origem='erp'` do MESMO `id_fornecedor`).
+
+    Povoado por `manutencao/coletar_e_gravar_nomes_erp.py` (coluna `Name`
+    da tela Worksheets, cortada no primeiro `'-'`) +
+    `manutencao/seed_erp_supplier_alias.py` (de-para invoice→Catapult,
+    revisado à mão). Usado por `crawler/flow/reconcile_erp_flow.py::
+    _buscar_po` para buscar no Catapult pelo nome que ELE conhece, não o
+    nome cru lido da invoice — que frequentemente diverge (o Catapult
+    trunca/abrevia). Fornecedor sem alias 'erp' cadastrado simplesmente não
+    aparece no mapa; quem chama cai pro nome cru da invoice (comportamento
+    de antes desta função existir)."""
+    rows = _ler(
+        conn,
+        f"""
+        SELECT inv.alias_norm, erp.alias AS erp_search_term
+          FROM {SCHEMA}.dim_fornecedor_alias inv
+          JOIN {SCHEMA}.dim_fornecedor_alias erp
+            ON erp.id_fornecedor = inv.id_fornecedor AND erp.origem = 'erp' AND erp.ativo
+         WHERE inv.origem = 'invoice' AND inv.ativo
+        """,
+        None, "termos de busca do ERP",
+    )
+    return {r["alias_norm"]: r["erp_search_term"] for r in rows}
 
 
 def save_supplier_alias(
@@ -126,15 +175,19 @@ def fetch_item_sinonimos(conn) -> dict[str, str]:
     Uma query por execução: o `matcher` consome isto em memória (via
     `match_items(..., sinonimos=...)`), nunca uma query por item.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT termo_norm, canonico
-              FROM {SCHEMA}.dim_item_sinonimo
-             WHERE ativo
-            """
-        )
-        return {termo_norm: canonico for termo_norm, canonico in cur.fetchall()}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT termo_norm, canonico
+                  FROM {SCHEMA}.dim_item_sinonimo
+                 WHERE ativo
+                """
+            )
+            return {termo_norm: canonico for termo_norm, canonico in cur.fetchall()}
+    except psycopg2.Error as exc:
+        reverter(conn)
+        raise DataAccessException("falha ao ler sinonimos de item") from exc
 
 
 def upsert_item_sinonimos(conn, rows: list[Sinonimo]) -> int:
@@ -167,17 +220,18 @@ def upsert_item_sinonimos(conn, rows: list[Sinonimo]) -> int:
 # Insumos da conciliação
 # ---------------------------------------------------------------------------
 
-# Colunas que _reconcile_one_invoice espera no header. `id_fornecedor` vem junto
-# para a conciliação usar o que a etapa IDENTIFICAR_FORNECEDOR já resolveu, em
-# vez de re-resolver em memória. Qualificadas com `i.` porque a query da janela
-# junta `processo`.
+# Colunas que reconcile_one_invoice espera no header. `fat_invoice.id_fornecedor`
+# não existe mais (removida do banco em produção) — o fornecedor é resolvido em
+# memória a cada conciliação via `dim_fornecedor_alias` (fetch_supplier_aliases),
+# não lido daqui. Qualificadas com `i.` porque a query da janela junta `processo`.
 _HEADER_COLS = f"""
-    i.id, i.id_processo, i.id_loja, i.id_fornecedor,
-    i.numero          AS invoice_number,
-    i.emissao         AS invoice_date,
-    i.fornecedor_lido AS supplier_name,
+    i.id, i.id_processo, i.id_loja,
+    i.numero_invoice          AS invoice_number,
+    i.dt_emissao      AS invoice_date,
+    i.nome_fornecedor AS supplier_name,
     i.total           AS total_amount,
-    i.confianca       AS reading_confidence
+    i.confianca       AS reading_confidence,
+    i.anotacao_manual_geral AS general_handwritten_notes
 """
 
 # cod_status que NÃO volta para a conciliação: já finalizou (com ou sem alerta)
@@ -185,10 +239,9 @@ _HEADER_COLS = f"""
 # errou (faixa 50-59) ou ainda não passou pela etapa. Reprocesso explícito (56)
 # vem por fetch_invoice_headers_reprocesso, fora da janela.
 _NAO_RECONCILIA = (
-    int(StatusExecEnum.FINALIZADO),
-    int(StatusExecEnum.FINALIZADO_COM_ALERTA),
-    int(StatusExecEnum.ENCERRADO_SEM_COTACAO),
-    int(StatusExecEnum.ENCERRADO_SEM_ARQUIVO),
+    int(StatusExecucao.FINALIZADO),
+    int(StatusExecucao.FINALIZADO_COM_ALERTA),
+    int(StatusExecucao.ENCERRADO_SEM_ARQUIVO),
 )
 
 
@@ -202,21 +255,19 @@ def fetch_invoice_headers_for_reconciliation(
     sem pendência não volta só por cair na janela de data.
     """
     sql = f"""
-        SELECT {_HEADER_COLS}
+        SELECT {_HEADER_COLS}, p.cod_status
           FROM {SCHEMA}.fat_invoice i
           JOIN {SCHEMA}.processo    p ON p.id = i.id_processo
-         WHERE i.emissao BETWEEN %s AND %s
+         WHERE i.dt_emissao BETWEEN %s AND %s
            AND p.cod_status NOT IN %s
     """
     params: list = [date_from, date_to, _NAO_RECONCILIA]
     if supplier:
-        sql += " AND i.fornecedor_lido ILIKE %s"
+        sql += " AND i.nome_fornecedor ILIKE %s"
         params.append(f"%{supplier}%")
-    sql += " ORDER BY i.emissao, i.id"
+    sql += " ORDER BY i.dt_emissao, i.id"
 
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return [dict(r) for r in cur.fetchall()]
+    return _ler(conn, sql, params, "invoices a conciliar")
 
 
 def fetch_invoice_headers_reprocesso(conn) -> list[dict]:
@@ -225,32 +276,19 @@ def fetch_invoice_headers_reprocesso(conn) -> list[dict]:
     Vêm fora da janela de data: um sinônimo ou alias novo pode ter destravado
     uma nota antiga. `reconcile_quote` une esta lista à da janela.
     """
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            f"""
-            SELECT {_HEADER_COLS}
-              FROM {SCHEMA}.fat_invoice i
-             WHERE i.id_processo IN (
-                       SELECT id FROM {SCHEMA}.processo
-                        WHERE cod_tipo = 'invoice' AND cod_status = 56
-                   )
-             ORDER BY i.emissao, i.id
-            """
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-
-def update_invoice_fornecedor(conn, id_invoice: int, id_fornecedor: int) -> None:
-    """Grava em `fat_invoice` o fornecedor que a etapa IDENTIFICAR_FORNECEDOR
-    resolveu. Fica aqui (e não em coleta_invoices) porque quem resolve é o fluxo
-    da conciliação — mesma razão de as leituras de invoice para conciliar
-    viverem neste módulo. O nível/score do match ficam em `fat_conciliacao`."""
-    with conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE {SCHEMA}.fat_invoice SET id_fornecedor = %s WHERE id = %s",
-            (id_fornecedor, id_invoice),
-        )
-    conn.commit()
+    return _ler(
+        conn,
+        f"""
+        SELECT {_HEADER_COLS}
+          FROM {SCHEMA}.fat_invoice i
+         WHERE i.id_processo IN (
+                   SELECT id FROM {SCHEMA}.processo
+                    WHERE cod_tipo = 'invoice' AND cod_status = %s
+               )
+         ORDER BY i.dt_emissao, i.id
+        """,
+        (int(_REPROC),), "invoices marcadas para reprocesso",
+    )
 
 
 def fetch_invoice_items_by_headers(conn, header_ids: list[int]) -> dict[int, list[dict]]:
@@ -261,25 +299,28 @@ def fetch_invoice_items_by_headers(conn, header_ids: list[int]) -> dict[int, lis
     """
     if not header_ids:
         return {}
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(
-            f"""
+    rows = _ler(
+        conn,
+        f"""
             SELECT id, id_invoice AS id_header, ordem AS item_order,
                    descricao   AS description,
                    qtd         AS quantity,
                    unidade     AS unit,
                    preco_unit  AS unit_price,
                    valor_linha AS total_price,
-                   anotacao_manual AS handwritten_notes
+                   anotacao_manual AS handwritten_notes,
+                   item_code, upc,
+                   caixas      AS cases,
+                   codigo_manual AS handwritten_code
               FROM {SCHEMA}.fat_invoice_item
              WHERE id_invoice = ANY(%s) AND tipo_linha = 'item'
              ORDER BY id_invoice, ordem NULLS LAST, id
             """,
-            (header_ids,),
-        )
-        agrupado: dict[int, list[dict]] = {}
-        for row in cur.fetchall():
-            agrupado.setdefault(row["id_header"], []).append(dict(row))
+        (header_ids,), "itens das invoices",
+    )
+    agrupado: dict[int, list[dict]] = {}
+    for row in rows:
+        agrupado.setdefault(row["id_header"], []).append(row)
     return agrupado
 
 
@@ -328,94 +369,202 @@ def save_reconciliation_header(conn, data: dict) -> int:
     """Grava a nota conciliada. Retorna o id.
 
     Sem `id_run`: a chave é (id_invoice, comparacao), então reconciliar de novo
-    atualiza em vez de acumular versões.
+    atualiza em vez de acumular versões. `comparacao` vem de `data` (default
+    `'cotacao'`, o único valor até a frente ERP existir) — é isso que permite
+    a mesma nota ter até duas linhas em `fat_conciliacao`, uma por frente.
+
+    `id_ciclo`, `id_fornecedor`, `revisar`, `match_nivel` e `match_score` não
+    existem mais nesta tabela (removidas do banco em produção). `id_fornecedor`
+    também foi removida de `fat_invoice` — não tem mais FK para fornecedor em
+    lugar nenhum; quem precisa dele resolve em memória via
+    `fetch_supplier_aliases`/`dim_fornecedor_alias`, a cada conciliação.
+    `revisar`, `match_nivel` e `match_score` sobrevivem em
+    `fat_conciliacao_item`. `id_ciclo` só fazia sentido para a frente 'cotacao'
+    (hoje desativada, ver módulo) e não tem substituto — se a frente 'cotacao'
+    voltar, essa coluna precisa voltar.
     """
-    veredito = _veredito(data.get("issue_codes"))
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            INSERT INTO {SCHEMA}.fat_conciliacao (
-                id_invoice, id_ciclo, id_loja, id_fornecedor, id_processo,
-                comparacao, cod_status, status_conc, revisar,
-                issue_codes, match_nivel, match_score
-            ) VALUES (%s, %s, %s, %s, %s, 'cotacao', %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id_invoice, comparacao) DO UPDATE SET
-                id_ciclo      = EXCLUDED.id_ciclo,
-                id_fornecedor = EXCLUDED.id_fornecedor,
-                id_processo   = EXCLUDED.id_processo,
-                cod_status    = EXCLUDED.cod_status,
-                status_conc   = EXCLUDED.status_conc,
-                revisar       = EXCLUDED.revisar,
-                issue_codes   = EXCLUDED.issue_codes,
-                match_nivel   = EXCLUDED.match_nivel,
-                match_score   = EXCLUDED.match_score,
-                criado_em     = now() AT TIME ZONE 'America/Sao_Paulo'
-            RETURNING id
-            """,
-            (
-                data["id_invoice_header"], data.get("id_request"),
-                data["id_loja"], data.get("id_supplier"), data.get("id_processo"),
-                int(veredito), veredito.name,
-                _revisar(data.get("issue_codes"), data.get("needs_review", False)),
-                data.get("issue_codes") or None,
-                data.get("match_level"),
-                data.get("supplier_match_score"),
-            ),
-        )
-        id_conc = cur.fetchone()[0]
-    conn.commit()
+    veredito = _status_conciliacao(data.get("issue_codes"))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {SCHEMA}.fat_conciliacao (
+                    id_invoice, id_loja, id_processo,
+                    comparacao, cod_status, status_conc,
+                    issue_codes
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id_invoice, comparacao) DO UPDATE SET
+                    id_processo   = EXCLUDED.id_processo,
+                    cod_status    = EXCLUDED.cod_status,
+                    status_conc   = EXCLUDED.status_conc,
+                    issue_codes   = EXCLUDED.issue_codes,
+                    criado_em     = now() AT TIME ZONE 'America/Sao_Paulo'
+                RETURNING id
+                """,
+                (
+                    data["id_invoice_header"], data["id_loja"], data.get("id_processo"),
+                    data.get("comparacao", "cotacao"),
+                    int(veredito), veredito.name,
+                    data.get("issue_codes") or None,
+                ),
+            )
+            id_conc = cur.fetchone()[0]
+        conn.commit()
+    except psycopg2.Error as exc:
+        reverter(conn)
+        raise DataAccessException(
+            f"falha ao gravar conciliacao da invoice id={data['id_invoice_header']}"
+        ) from exc
     return id_conc
 
 
 def save_reconciliation_items(conn, id_recon_header: int, rows: list[dict]) -> int:
-    """Grava as linhas comparadas. Calcula `dif_valor`, que é o que o BI soma."""
+    """Grava as linhas comparadas. Calcula `dif_valor`, que é o que o BI soma.
+
+    `item_referencia` aceita `item_name_quote` (frente cotação) ou
+    `item_name_po` (frente ERP/Catapult, `conciliacao/reconcile_erp.py`) — as
+    duas frentes gravam na mesma tabela, só `comparacao` muda (ver cabeçalho
+    do módulo). `id_price_quote` não tem equivalente do lado ERP: a chave do
+    PO é posicional dentro da raspagem, não um id de `fat_cotacao_preco`.
+
+    As colunas do lado PO (`qtd_po`, `qtd_po_recebida`, `dif_qtd`,
+    `valor_invoice`, `valor_po`) só vêm da frente ERP e ficam nulas na frente
+    cotação — e também na linha sem par no PO, que não tem contra o que
+    comparar. Linhas que casaram com o MESMO item do PO repetem esses valores:
+    a comparação é feita pelo grupo somado, não linha a linha (ver
+    `conciliacao/reconcile_erp.py::_comparar_grupo`).
+    """
     if not rows:
         return 0
 
     dados = []
     for r in rows:
-        veredito = _veredito(r.get("issue_codes"))
+        veredito = _status_conciliacao(r.get("issue_codes"))
         dif, qtd = r.get("price_diff"), r.get("qty_invoice")
         dif_valor = (dif * qtd) if (dif is not None and qtd is not None) else None
+        item_referencia = r.get("item_name_quote") or r.get("item_name_po")
         dados.append((
-            id_recon_header, r["id_invoice_item"], r.get("id_price_quote"),
-            r.get("description_invoice"), r.get("item_name_quote"),
+            id_recon_header, r["id_invoice_item"],
+            r.get("description_invoice"), item_referencia,
             r.get("match_level"), r.get("match_score"), qtd,
-            r.get("price_invoice"), r.get("price_other"), r.get("price_other_raw"),
+            r.get("price_invoice"), r.get("price_other"),
             dif, r.get("price_diff_pct"), dif_valor,
             int(veredito), veredito.name,
             _revisar(r.get("issue_codes"), r.get("needs_review", False)),
             r.get("issue_codes") or None,
+            r.get("qty_po"), r.get("qty_po_received"), r.get("qty_diff"),
+            r.get("total_invoice"), r.get("total_po"),
         ))
 
-    with conn.cursor() as cur:
-        cur.executemany(
-            f"""
-            INSERT INTO {SCHEMA}.fat_conciliacao_item (
-                id_conciliacao, id_invoice_item, id_cotacao_preco,
-                descricao_invoice, item_referencia, match_nivel, match_score,
-                qtd, preco_invoice, preco_referencia, preco_ref_raw,
-                dif_unitaria, dif_pct, dif_valor, cod_status, status_conc, revisar,
-                issue_codes
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (id_conciliacao, id_invoice_item) DO UPDATE SET
-                id_cotacao_preco = EXCLUDED.id_cotacao_preco,
-                item_referencia  = EXCLUDED.item_referencia,
-                match_nivel      = EXCLUDED.match_nivel,
-                match_score      = EXCLUDED.match_score,
-                preco_referencia = EXCLUDED.preco_referencia,
-                dif_unitaria     = EXCLUDED.dif_unitaria,
-                dif_pct          = EXCLUDED.dif_pct,
-                dif_valor        = EXCLUDED.dif_valor,
-                cod_status       = EXCLUDED.cod_status,
-                status_conc      = EXCLUDED.status_conc,
-                revisar          = EXCLUDED.revisar,
-                issue_codes      = EXCLUDED.issue_codes
-            """,
-            dados,
-        )
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                f"""
+                INSERT INTO {SCHEMA}.fat_conciliacao_item (
+                    id_conciliacao, id_invoice_item,
+                    descricao_invoice, item_referencia, match_nivel, match_score,
+                    qtd, preco_invoice, preco_referencia,
+                    dif_unitaria, dif_pct, dif_valor, cod_status, status_conc, revisar,
+                    issue_codes,
+                    qtd_po, qtd_po_recebida, dif_qtd, valor_invoice, valor_po
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                          %s,%s,%s,%s,%s)
+                ON CONFLICT (id_conciliacao, id_invoice_item) DO UPDATE SET
+                    item_referencia  = EXCLUDED.item_referencia,
+                    match_nivel      = EXCLUDED.match_nivel,
+                    match_score      = EXCLUDED.match_score,
+                    preco_referencia = EXCLUDED.preco_referencia,
+                    dif_unitaria     = EXCLUDED.dif_unitaria,
+                    dif_pct          = EXCLUDED.dif_pct,
+                    dif_valor        = EXCLUDED.dif_valor,
+                    cod_status       = EXCLUDED.cod_status,
+                    status_conc      = EXCLUDED.status_conc,
+                    revisar          = EXCLUDED.revisar,
+                    issue_codes      = EXCLUDED.issue_codes,
+                    qtd_po           = EXCLUDED.qtd_po,
+                    qtd_po_recebida  = EXCLUDED.qtd_po_recebida,
+                    dif_qtd          = EXCLUDED.dif_qtd,
+                    valor_invoice    = EXCLUDED.valor_invoice,
+                    valor_po         = EXCLUDED.valor_po
+                """,
+                dados,
+            )
+        conn.commit()
+    except psycopg2.Error as exc:
+        reverter(conn)
+        raise DataAccessException(
+            f"falha ao gravar itens da conciliacao id={id_recon_header}"
+        ) from exc
     return len(dados)
+
+
+def fetch_divergencia_erp_para_relatorio(
+    conn, id_invoice: int | None = None,
+) -> tuple[dict, dict] | None:
+    """Busca uma invoice já conciliada com divergência na frente ERP
+    (`comparacao='erp'`), no formato que `conciliacao.relatorio_divergencia.
+    gerar_relatorio_divergencia_erp` espera: `(header, resultado)`.
+
+    `id_invoice`: pega essa invoice específica (ainda exige divergência
+    nesta frente — `None` se ela não tiver). Sem argumento, pega a
+    divergência mais recente. Uso manual — gerar um relatório de exemplo
+    com dado real (`manutencao/gerar_relatorio_divergencia.py`); o fluxo
+    oficial (`crawler/flow/reconcile_erp_flow.py`) já gera o relatório na
+    hora, a partir do `resultado` que acabou de calcular, sem reler o banco.
+    """
+    sql = f"""
+        SELECT fc.id AS id_conciliacao,
+               fi.id, fi.numero_invoice AS invoice_number, fi.dt_emissao AS invoice_date,
+               fi.nome_fornecedor AS supplier_name, fi.id_loja
+          FROM {SCHEMA}.fat_conciliacao fc
+          JOIN {SCHEMA}.fat_invoice fi ON fi.id = fc.id_invoice
+         WHERE fc.comparacao = 'erp' AND fc.status_conc = %s
+    """
+    params: list = [Veredito.DIVERGENCIA.name]
+    if id_invoice is not None:
+        sql += " AND fc.id_invoice = %s"
+        params.append(id_invoice)
+    sql += " ORDER BY fc.criado_em DESC LIMIT 1"
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            if row is None:
+                return None
+            header = dict(row)
+            id_conciliacao = header.pop("id_conciliacao")
+
+            # Mesmas colunas das queries do Grafana ("Divergência Qtd" e
+            # "Divergência Valor") — qtd/qtd_po/dif_qtd só fazem sentido pra
+            # quem tem QTY_MISMATCH_PO; preco/valor/dif_unitaria, pra quem
+            # tem PRICE_MISMATCH_PO. `conciliacao/relatorio_divergencia.py`
+            # decide qual usar em cada seção a partir de `issue_codes`.
+            cur.execute(
+                f"""
+                SELECT fci.descricao_invoice AS description_invoice, fci.issue_codes,
+                       fii.ordem              AS item_order,
+                       fci.qtd                AS qty_invoice,
+                       fci.qtd_po             AS qty_po,
+                       fci.dif_qtd            AS qty_diff,
+                       fci.preco_invoice      AS price_invoice,
+                       fci.valor_invoice      AS total_invoice,
+                       fci.valor_po           AS total_po,
+                       fci.dif_unitaria       AS price_diff
+                  FROM {SCHEMA}.fat_conciliacao_item fci
+                  JOIN {SCHEMA}.fat_invoice_item fii ON fii.id = fci.id_invoice_item
+                 WHERE fci.id_conciliacao = %s
+                 ORDER BY fii.ordem
+                """,
+                (id_conciliacao,),
+            )
+            itens = [dict(r) for r in cur.fetchall()]
+    except psycopg2.Error as exc:
+        raise DataAccessException(
+            f"falha ao buscar divergencia erp para relatorio (id_invoice={id_invoice})"
+        ) from exc
+
+    return header, {"has_issue": True, "items": itens}
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +632,7 @@ def marcar_reprocesso_por_fornecedor(conn) -> int:
             UPDATE {SCHEMA}.processo
                SET {_REPROC_SET},
                    atualizado_em = now() AT TIME ZONE 'America/Sao_Paulo'
-             WHERE cod_tipo = 'invoice' AND cod_status = {int(StatusExecEnum.ERRO_SEM_FORNECEDOR)}
+             WHERE cod_tipo = 'invoice' AND cod_status = {int(StatusExecucao.ERRO_SEM_FORNECEDOR)}
             """
         )
         n = cur.rowcount
@@ -494,13 +643,19 @@ def marcar_reprocesso_por_fornecedor(conn) -> int:
 def marcar_reprocesso_por_cotacao(conn) -> int:
     """Remarca as notas que fecharam com `no_quote_for_supplier` para
     reconciliar de novo — chamado depois que `check_responses` importa preço
-    novo. `ENCERRADO_SEM_COTACAO` nunca é o status usado aqui de verdade: sem
-    cotação sempre liga `needs_review`, então a nota fecha como
+    novo. Sem cotação sempre liga `needs_review`, então a nota fecha como
     `FINALIZADO_COM_ALERTA` (o mesmo status de qualquer outro alerta) — o
     jeito de achar só as que fecharam por falta de cotação é olhar
-    `fat_conciliacao.issue_codes`, não `processo.cod_status`. Sem isto a nota
-    fica presa: `FINALIZADO_COM_ALERTA` está em `_NAO_RECONCILIA`, e nada
-    além disto a devolve pra janela de data."""
+    `fat_conciliacao.issue_codes`, não `processo.cod_status` (não existe um
+    status próprio pra isso — `ENCERRADO_SEM_COTACAO` foi removido de
+    `domain/enums.py`, nunca chegou a ser emitido de verdade). Sem isto a
+    nota fica presa: `FINALIZADO_COM_ALERTA` está em `_NAO_RECONCILIA`, e
+    nada além disto a devolve pra janela de data.
+
+    Vale notar: `no_quote_for_supplier` só é emitido pela comparação invoice
+    x cotação (`conciliacao_flow.py`/`reconcile_quote.py`), hoje desativada
+    — então esta função não encontra nada pra remarcar na prática, mas fica
+    inofensiva (n=0) se `check_responses` continuar chamando."""
     with conn.cursor() as cur:
         cur.execute(
             f"""
@@ -519,17 +674,20 @@ def marcar_reprocesso_por_cotacao(conn) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Relatorio Cotacao x Invoice — leitura agregada, sem tocar na escrita acima
+# Relatorio Invoice x PO (Catapult) — leitura agregada, sem tocar na escrita
+# acima. Nome das funcoes/abas ainda fala "Cotacao x Invoice" por historico
+# (crawler/reports/painel_excel.py) — a comparacao que alimenta os dois e a
+# do ERP, cotacao nao compara mais nada (ver domain/enums.py).
 #
-# Duas abas, duas consultas, sem interseccao (StatusConciliacaoEnum em
+# Duas abas, duas consultas, sem interseccao (StatusConciliacao em
 # domain/enums.py):
 #   `fetch_comparacao_precos`  aba 1 — so o que conciliou: CONFERIDO (0)
-#   `fetch_divergencias`       aba 2 — so o que precisa de acao: preco fora da
-#                              tolerancia (10-19) e item sem comparacao (20-29)
+#   `fetch_divergencias`       aba 2 — so o que precisa de acao: diverge do PO
+#                              (10-19) e item sem PO pra comparar (20-29)
 # ---------------------------------------------------------------------------
 
-_DIVERGENTE = (int(Veredito.PRECO_ACIMA), int(Veredito.PRECO_ABAIXO))
-_SEM_COMPARACAO = (int(Veredito.SEM_REFERENCIA_ITEM), int(Veredito.UNIDADE_DIVERGENTE))
+_DIVERGENTE = (int(Veredito.DIVERGENCIA),)
+_SEM_COMPARACAO = (int(Veredito.SEM_REFERENCIA_ITEM),)
 
 
 _CONCILIADO = (int(Veredito.CONFERIDO),)
@@ -537,9 +695,15 @@ _DIVERGENCIA = _DIVERGENTE + _SEM_COMPARACAO
 
 # Colunas comuns às duas abas — o relatório é o mesmo item visto de dois
 # ângulos, então nome de coluna diferente entre as abas só confundiria.
+#
+# `fornecedor` vem direto de `fat_invoice.nome_fornecedor` (o nome como a
+# invoice foi lida) — `fat_invoice.id_fornecedor` não existe mais (removida do
+# banco em produção), então não dá mais para enriquecer com o nome canônico de
+# `dim_fornecedor` aqui; quem precisa do fornecedor resolvido usa
+# `fetch_supplier_aliases`/`dim_fornecedor_alias` em memória, não este join.
 _COLS_RELATORIO = """
                        fi.arquivo,
-                       COALESCE(df.nome, fi.fornecedor_lido) AS fornecedor,
+                       fi.nome_fornecedor                    AS fornecedor,
                        ci.descricao_invoice                  AS item,
                        ci.item_referencia                    AS item_cotado,
                        ci.qtd,
@@ -552,7 +716,6 @@ _FROM_RELATORIO = """
                   FROM {schema}.fat_conciliacao_item ci
                   JOIN {schema}.fat_conciliacao      fc ON fc.id = ci.id_conciliacao
                   JOIN {schema}.fat_invoice          fi ON fi.id = fc.id_invoice
-                  LEFT JOIN {schema}.dim_fornecedor  df ON df.id = fc.id_fornecedor
 """
 
 

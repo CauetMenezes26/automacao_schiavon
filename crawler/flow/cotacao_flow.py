@@ -15,45 +15,39 @@ O ciclo completo (geração de Excel, envio, verificação, importação) mora e
 
 from __future__ import annotations
 
-from commons.db import connect_db
+from commons.db import conexao
 from commons.exception import BusinessException
 from commons.logging_config import get_logger
 from cotacao.quotation import check_responses, send_followups, start_weekly_quotation
+from domain.config import Config
 from domain.service.cotacao_service import fetch_open_quotation_request
 
 log = get_logger(__name__)
 
 
-def cotacao_flow(env: dict) -> str:
+def cotacao_flow(config: Config) -> str:
     """Avança um passo do ciclo de cotação. Retorna o passo executado."""
+    # `with` em vez de try/finally aninhado: o `close` era o unico motivo do
+    # try de dentro, e aninhar try e proibido pela governanca.
     try:
-        conn = connect_db(env)
-        try:
+        with conexao(config.banco) as conn:
             aberto = fetch_open_quotation_request(conn)
-        finally:
-            _fechar(conn)
 
         if aberto is None:
             log.info("cotacao: nenhum ciclo aberto - iniciando a cotacao da semana")
-            start_weekly_quotation(env)
+            start_weekly_quotation(config)
             return "iniciado"
 
         log.info("cotacao: ciclo %s aberto (id=%s) - verificando respostas",
                  aberto["week_label"], aberto["id"])
-        check_responses(env)
-        send_followups(env)
+        check_responses(config)
+        send_followups(config)
         return "avancado"
 
     except BusinessException as exc:
         log.warning("cotacao: caso de negocio - %s", exc)
         return "negocio"
 
-
-def _fechar(conn) -> None:
-    try:
-        conn.close()
-    except Exception:  # noqa: BLE001
-        log.warning("cotacao: falha ao fechar conexao", exc_info=True)
 
 
 # Compat: nome antigo da fachada.

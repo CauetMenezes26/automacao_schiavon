@@ -27,14 +27,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from conciliacao.matcher import match_supplier, norm_supplier  # noqa: E402
-from conciliacao.conciliacao_db import (  # noqa: E402
+from commons.matcher import match_supplier, norm_supplier  # noqa: E402
+from domain.service.conciliacao_service import (  # noqa: E402
     marcar_reprocesso_por_fornecedor,
     save_supplier_alias,
 )
-from utils.connection import connect_db, load_env  # noqa: E402
+from commons.db import connect_db  # noqa: E402
+from domain.config import carregar_config  # noqa: E402
 
-from utils.paths import ENV_PATH, FILES_DIR  # noqa: E402
+from commons.paths import FILES_DIR  # noqa: E402
 
 CSV_PATH = FILES_DIR / "supplier_alias_candidatos.csv"
 
@@ -52,7 +53,7 @@ def _fornecedores_cadastrados(conn) -> list[dict]:
 def _fornecedores_das_invoices(conn) -> list[tuple[str, int]]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT fornecedor_lido AS supplier_name, count(*)"
+            "SELECT nome_fornecedor AS supplier_name, count(*)"
             " FROM dwschiavon2.fat_invoice"
             " WHERE supplier_name IS NOT NULL GROUP BY 1 ORDER BY 2 DESC, 1"
         )
@@ -147,7 +148,7 @@ def main() -> None:
                         help="Le o CSV revisado e grava os aliases aprovados.")
     args = parser.parse_args()
 
-    conn = connect_db(load_env(ENV_PATH))
+    conn = connect_db(carregar_config().banco)
     try:
         # as tabelas ja existem: sao criadas pelo DDL do dwschiavon2
         print(f"\n{'='*60}")

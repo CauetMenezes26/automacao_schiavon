@@ -1,33 +1,36 @@
-"""Sincronização do de-para de vocabulário de item a partir da planilha DE-PARA.
+"""Sincronização do de-para de vocabulário de item a partir do Google Sheets.
 
-Até aqui os sinônimos (`CHIX→CHICKEN`, `SASSAMI→TENDER`, ...) viviam hardcoded em
-`conciliacao/matcher.py`. Agora são dado de banco (`dwschiavon2.dim_item_sinonimo`),
-alimentado por uma planilha que o time de domínio edita
-(`files/sinonimos/DE_PARA_ITENS.xlsx`, colunas `DE` | `PARA`).
+Os sinônimos (`CHIX→CHICKEN`, `SASSAMI→TENDER`, ...) são dado de banco
+(`dwschiavon2.dim_item_sinonimo`), alimentado pela aba `De-Para` de uma
+planilha do Google Sheets que o cliente edita (colunas `DE` | `PARA`).
+Substitui a antiga planilha local `files/sinonimos/DE_PARA_ITENS.xlsx` — o
+cliente agora edita direto no Sheets, sem depender de arquivo/execução local.
 
-O pipeline (`main.py`) chama `sincronizar_sinonimos(env)` como **preâmbulo**, no
-início de cada execução: lê a planilha e faz upsert idempotente. Se a planilha
-estiver aberta/travada no Excel, **pula e deixa para a próxima execução** — o
-preâmbulo nunca derruba o pipeline, e a tabela segue valendo com o último estado
-bom.
+O pipeline (`main.py`) chama `sinonimos_flow(config)` como **preâmbulo**, no
+início de cada execução: lê a aba `De-Para` e faz upsert idempotente. Se o
+Sheets estiver indisponível (API fora do ar, credencial ausente, aba renomeada)
+**pula e deixa para a próxima execução** — o preâmbulo nunca derruba o
+pipeline, e a tabela segue valendo com o último estado bom.
 
-A leitura/validação (`sinonimos_de_planilha`) não toca o banco, de propósito:
-testável sem Postgres, como `matcher.py`.
+A leitura/validação (`sinonimos_do_sheet`) não toca o banco, de propósito:
+testável sem Postgres, como `matcher.py`. A validação linha a linha
+(`_sinonimos_de_linhas`) é agnóstica de fonte — só itera tuplas — para poder
+ser testada com uma lista fake em memória, sem precisar de rede.
 """
 
 from __future__ import annotations
 
-import zipfile
-from pathlib import Path
-from typing import Callable, NamedTuple
-
-import openpyxl
+from typing import Callable, NamedTuple, Sequence
 
 from commons.matcher import norm_text
-from commons.paths import SINONIMOS_DIR
+from commons.sheets import SheetsError, read_values
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
 
 _COL_DE = "DE"
 _COL_PARA = "PARA"
+_RANGE_DE_PARA = "De-Para!A:B"
 
 
 class Sinonimo(NamedTuple):
@@ -39,7 +42,7 @@ class Sinonimo(NamedTuple):
 
 
 class Relatorio(NamedTuple):
-    """Resumo de uma leitura de planilha."""
+    """Resumo de uma leitura da aba De-Para."""
 
     lidas:      int
     validas:    int
@@ -47,27 +50,13 @@ class Relatorio(NamedTuple):
     duplicadas: int
     descartes:  list[tuple[int, str]]   # (linha, motivo) — inválidas e duplicadas
 
-    @staticmethod
-    def vazio() -> "Relatorio":
-        return Relatorio(0, 0, 0, 0, [])
-
-    def somar(self, outro: "Relatorio") -> "Relatorio":
-        return Relatorio(
-            self.lidas + outro.lidas,
-            self.validas + outro.validas,
-            self.invalidas + outro.invalidas,
-            self.duplicadas + outro.duplicadas,
-            self.descartes + outro.descartes,
-        )
-
 
 def _clean_cell(value) -> str:
-    """Texto da célula sem espaço não-separável (U+00A0, vem do Excel) e sem
-    espaços sobrando."""
+    """Texto da célula sem espaço não-separável (U+00A0) e sem espaços sobrando."""
     return str(value).replace("\xa0", " ").strip() if value is not None else ""
 
 
-def _mapa_colunas(header: tuple) -> dict[str, int]:
+def _mapa_colunas(header: Sequence) -> dict[str, int]:
     """Índice das colunas `DE` e `PARA` na linha de cabeçalho, em qualquer ordem."""
     mapa: dict[str, int] = {}
     for idx, cell in enumerate(header or ()):
@@ -77,107 +66,100 @@ def _mapa_colunas(header: tuple) -> dict[str, int]:
     faltando = [c for c in (_COL_DE, _COL_PARA) if c not in mapa]
     if faltando:
         raise ValueError(
-            f"Excel inválido: coluna(s) {', '.join(faltando)} não encontrada(s) "
-            f"na primeira linha (cabeçalho esperado: 'DE' | 'PARA')."
+            f"Aba De-Para inválida: coluna(s) {', '.join(faltando)} não "
+            f"encontrada(s) na primeira linha (cabeçalho esperado: 'DE' | 'PARA')."
         )
     return mapa
 
 
-def sinonimos_de_planilha(path: Path) -> tuple[list[Sinonimo], Relatorio]:
-    """Lê a planilha DE-PARA e devolve os sinônimos válidos + o relatório.
+def _sinonimos_de_linhas(linhas: Sequence[Sequence]) -> tuple[list[Sinonimo], Relatorio]:
+    """Valida linhas DE/PARA e devolve os sinônimos válidos + o relatório.
 
     Regras:
-      * primeira aba; linha 1 = cabeçalho com `DE` e `PARA` (qualquer ordem);
+      * linha 1 = cabeçalho com `DE` e `PARA` (qualquer ordem);
       * linha totalmente vazia é ignorada em silêncio;
       * só um lado preenchido, `DE` que normaliza para vazio, ou `termo_norm` com
         mais de um token (nunca casaria no `.split()` de `norm_item`) → inválida;
-      * `termo_norm` repetido no arquivo → a última linha vence.
+      * `termo_norm` repetido → a última linha vence.
 
-    Não toca o banco. `ValueError` só quando a planilha nem tem as colunas.
+    Fonte-agnóstico: recebe qualquer sequência de linhas já em memória (Sheets
+    hoje). `ValueError` só quando a aba nem tem as colunas.
     """
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    try:
-        ws = wb[wb.sheetnames[0]]
-        linhas = ws.iter_rows(values_only=True)
-        try:
-            header = next(linhas)
-        except StopIteration:
-            raise ValueError("Excel inválido: planilha sem linhas.")
-        cols = _mapa_colunas(header)
-        i_de, i_para = cols[_COL_DE], cols[_COL_PARA]
+    if not linhas:
+        raise ValueError("Aba De-Para vazia (sem nem cabeçalho).")
 
-        por_termo: dict[str, Sinonimo] = {}
-        lidas = validas = invalidas = duplicadas = 0
-        descartes: list[tuple[int, str]] = []
+    it = iter(linhas)
+    cols = _mapa_colunas(next(it))
+    i_de, i_para = cols[_COL_DE], cols[_COL_PARA]
 
-        for n, row in enumerate(linhas, start=2):
-            de_raw = _clean_cell(row[i_de] if len(row) > i_de else None)
-            para_raw = _clean_cell(row[i_para] if len(row) > i_para else None)
+    por_termo: dict[str, Sinonimo] = {}
+    lidas = invalidas = duplicadas = 0
+    descartes: list[tuple[int, str]] = []
 
-            if not de_raw and not para_raw:
-                continue
-            lidas += 1
+    for n, row in enumerate(it, start=2):
+        de_raw = _clean_cell(row[i_de] if len(row) > i_de else None)
+        para_raw = _clean_cell(row[i_para] if len(row) > i_para else None)
 
-            if bool(de_raw) != bool(para_raw):
-                invalidas += 1
-                descartes.append((n, "só um lado preenchido"))
-                continue
+        if not de_raw and not para_raw:
+            continue
+        lidas += 1
 
-            termo_norm = norm_text(de_raw)
-            canonico = norm_text(para_raw)
-            if not termo_norm:
-                invalidas += 1
-                descartes.append((n, f"DE sem conteúdo útil: {de_raw!r}"))
-                continue
-            if not canonico:
-                invalidas += 1
-                descartes.append((n, f"PARA sem conteúdo útil: {para_raw!r}"))
-                continue
-            if " " in termo_norm:
-                invalidas += 1
-                descartes.append(
-                    (n, f"DE com mais de um token nunca casaria: {termo_norm!r}")
-                )
-                continue
+        if bool(de_raw) != bool(para_raw):
+            invalidas += 1
+            descartes.append((n, "só um lado preenchido"))
+            continue
 
-            if termo_norm in por_termo:
-                duplicadas += 1
-                descartes.append((n, f"termo repetido, última vence: {termo_norm!r}"))
-            por_termo[termo_norm] = Sinonimo(de_raw, termo_norm, canonico)
+        termo_norm = norm_text(de_raw)
+        canonico = norm_text(para_raw)
+        if not termo_norm:
+            invalidas += 1
+            descartes.append((n, f"DE sem conteúdo útil: {de_raw!r}"))
+            continue
+        if not canonico:
+            invalidas += 1
+            descartes.append((n, f"PARA sem conteúdo útil: {para_raw!r}"))
+            continue
+        if " " in termo_norm:
+            invalidas += 1
+            descartes.append(
+                (n, f"DE com mais de um token nunca casaria: {termo_norm!r}")
+            )
+            continue
 
-        validas = len(por_termo)
-        return list(por_termo.values()), Relatorio(
-            lidas, validas, invalidas, duplicadas, descartes
-        )
-    finally:
-        wb.close()
+        if termo_norm in por_termo:
+            duplicadas += 1
+            descartes.append((n, f"termo repetido, última vence: {termo_norm!r}"))
+        por_termo[termo_norm] = Sinonimo(de_raw, termo_norm, canonico)
+
+    validas = len(por_termo)
+    return list(por_termo.values()), Relatorio(lidas, validas, invalidas, duplicadas, descartes)
 
 
-def _planilhas_em(directory: Path) -> list[Path]:
-    """Arquivos Excel do diretório, ignorando o lock do Excel (`~$...`)."""
-    if not directory.exists():
-        return []
-    return sorted(
-        p for p in directory.iterdir()
-        if p.is_file()
-        and p.suffix.lower() in (".xlsx", ".xls")
-        and not p.name.startswith("~$")
-    )
+def sinonimos_do_sheet(sheet_id: str) -> tuple[list[Sinonimo], Relatorio]:
+    """Lê a aba `De-Para` da planilha e devolve os sinônimos válidos + o relatório.
+
+    Não toca o banco. `SheetsError` propaga (API fora do ar, credencial
+    ausente, planilha não compartilhada); `ValueError` quando a aba não tem as
+    colunas certas.
+    """
+    linhas = read_values(sheet_id, _RANGE_DE_PARA)
+    return _sinonimos_de_linhas(linhas)
 
 
-def _sincronizar(
+def sincronizar(
     conn,
-    directory: Path = SINONIMOS_DIR,
+    sheet_id: str | None,
     *,
-    _leitor: Callable[[Path], tuple[list[Sinonimo], Relatorio]] = sinonimos_de_planilha,
+    _leitor: Callable[[str], tuple[list[Sinonimo], Relatorio]] = sinonimos_do_sheet,
     aplicar: bool = True,
 ) -> Relatorio | None:
-    """Lê as planilhas DE-PARA do diretório e faz upsert dos sinônimos.
+    """Lê a aba De-Para do Sheets e faz upsert dos sinônimos.
 
-    Retorna `None` quando não há nada a fazer (diretório inexistente ou vazio).
-    Uma planilha ilegível (aberta no Excel, gravação parcial) é **pulada com
-    aviso**, nunca propaga. Idempotente: rodar de novo com a mesma planilha não
-    muda nada.
+    Retorna `None` quando não há planilha configurada (`sheet_id` ausente —
+    feature desligada) ou quando a leitura falhou. Falha ao ler o Sheets (API
+    fora do ar, credencial ausente, aba renomeada) é **pulada com aviso**,
+    nunca propaga — o preâmbulo não pode derrubar o pipeline. Idempotente:
+    rodar de novo com o mesmo conteúdo não muda nada.
 
     `_leitor` é injetável só para teste. `aplicar=False` faz dry-run (não grava).
     """
@@ -187,34 +169,19 @@ def _sincronizar(
         upsert_item_sinonimos,
     )
 
-    planilhas = _planilhas_em(directory)
-    if not planilhas:
+    if not sheet_id:
         return None
 
-    por_termo: dict[str, Sinonimo] = {}
-    relatorio = Relatorio.vazio()
-    lidas_ok = 0
-
-    for path in planilhas:
-        try:
-            rows, rel = _leitor(path)
-        except (PermissionError, OSError, zipfile.BadZipFile, KeyError, ValueError) as exc:
-            print(f"  ⚠ planilha de sinônimos indisponível ({path.name}: {exc}); "
-                  "pulando nesta execução")
-            continue
-        except Exception as exc:  # noqa: BLE001 — preâmbulo não pode derrubar o pipeline
-            print(f"  ⚠ erro lendo {path.name}: {exc}; pulando nesta execução")
-            continue
-
-        lidas_ok += 1
-        relatorio = relatorio.somar(rel)
-        for s in rows:                       # último arquivo vence em caso de choque
-            por_termo[s.termo_norm] = s
-
-    if not lidas_ok:
+    try:
+        linhas, relatorio = _leitor(sheet_id)
+    except SheetsError as exc:
+        log.warning("planilha De-Para indisponivel (%s); pulando nesta execucao", exc)
+        return None
+    except ValueError as exc:
+        log.warning("planilha De-Para invalida (%s); pulando nesta execucao", exc)
         return None
 
-    linhas = list(por_termo.values())
+    mudou = False
     if aplicar:
         # O que mudou de fato: termo novo ou com destino diferente. Só isso
         # justifica reprocessar notas antigas (G10).
@@ -223,17 +190,18 @@ def _sincronizar(
         upsert_item_sinonimos(conn, linhas)
 
     verbo = "sincronizados" if aplicar else "lidos (dry-run)"
-    print(f"  ✓ {len(linhas)} sinônimo(s) {verbo}"
-          f"  ({relatorio.invalidas} inválida(s), {relatorio.duplicadas} duplicada(s))")
+    log.info(
+        "%s sinonimo(s) %s (%s invalida(s), %s duplicada(s))",
+        len(linhas), verbo, relatorio.invalidas, relatorio.duplicadas,
+    )
     for linha, motivo in relatorio.descartes:
-        print(f"      linha {linha}: {motivo}")
+        log.info("linha %s: %s", linha, motivo)
 
     if aplicar and mudou:
         n = marcar_reprocesso_por_vocabulario(conn)
         if n < 0:
-            print("  ⚠ vocabulário mudou, mas há notas demais para remarcar "
-                  "automaticamente — rode a reconciliação por período à mão")
+            log.warning("vocabulario mudou, mas ha notas demais para remarcar automaticamente - rode a reconciliacao por periodo a mao")
         elif n:
-            print(f"  → {n} nota(s) remarcada(s) para reconciliação (vocabulário mudou)")
+            log.info("-> %s nota(s) remarcada(s) para reconciliacao (vocabulario mudou)", n)
 
     return relatorio

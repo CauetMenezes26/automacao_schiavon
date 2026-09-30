@@ -1,8 +1,8 @@
 """Sistemas do fluxo — a fonte da verdade, em código.
 
 Mesmo arranjo de `categorias.py` e `status_exec.py`: o banco (`dim_sistema`)
-guarda o `codigo` e o status de acesso; o significado e o "de que env-vars ele
-depende" moram aqui.
+guarda o `codigo` e o status de acesso; o significado mora aqui. De que chaves do
+profile cada sistema depende: `domain/config.py::Config.checar_sistema`.
 
 POR QUE ESTE MÓDULO EXISTE
 
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-__all__ = ["Sistema", "CRITICOS", "env_keys", "checar_env"]
+__all__ = ["Sistema", "CRITICOS"]
 
 
 class Sistema(StrEnum):
@@ -33,6 +33,7 @@ class Sistema(StrEnum):
     SMTP_EMAIL = "smtp_email"
     ANTHROPIC_VISION = "anthropic_vision"
     ERP_CATAPULT = "erp_catapult"
+    GOOGLE_SHEETS = "google_sheets"
 
     @property
     def descricao(self) -> str:
@@ -45,36 +46,13 @@ _DESCRICAO: dict[Sistema, str] = {
     Sistema.TWILIO_WHATSAPP: "Twilio — envio de cotação e cobrança por WhatsApp.",
     Sistema.SMTP_EMAIL: "SMTP — envio de cotação por e-mail e alertas à operação.",
     Sistema.ANTHROPIC_VISION: "API Anthropic — leitura das invoices (Claude Vision).",
-    Sistema.ERP_CATAPULT: "ERP Catapult — conciliação contra a nota (próximo ciclo).",
+    Sistema.ERP_CATAPULT: "ERP Catapult — conciliação da nota contra o PO (FLUXO 4).",
+    Sistema.GOOGLE_SHEETS: "Google Sheets — planilha De-Para/Pendentes de sinônimo de item.",
 }
 
-# env-vars que cada sistema precisa para sequer tentar autenticar. `checar_env`
-# usa isto como proxy barato: chave ausente = acesso vai falhar.
-_ENV_KEYS: dict[Sistema, tuple[str, ...]] = {
-    Sistema.SHAREPOINT_WINDERMERE: ("SHAREPOINT_USERNAME", "SHAREPOINT_PASSWORD"),
-    Sistema.SHAREPOINT_DRPHILLIPS: ("SHAREPOINT_USERNAME", "SHAREPOINT_PASSWORD"),
-    Sistema.TWILIO_WHATSAPP: ("ACCOUNT_SID", "AUTH_TOKEN", "TWILIO_NUMBER", "TWILIO_CONTENT_SID"),
-    Sistema.SMTP_EMAIL: ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"),
-    Sistema.ANTHROPIC_VISION: ("schiavon_key_vision",),
-    Sistema.ERP_CATAPULT: ("ECRS_USER", "ECRS_PASSWORD"),
-}
-
-# Sistemas cuja falha vira alerta para a operação. O ERP fica de fora até o
-# fluxo existir.
-CRITICOS: frozenset[str] = frozenset(s for s in Sistema if s is not Sistema.ERP_CATAPULT)
-
-
-def env_keys(sistema: Sistema) -> tuple[str, ...]:
-    return _ENV_KEYS[sistema]
-
-
-def checar_env(sistema: Sistema, env: dict) -> tuple[bool, str | None]:
-    """Proxy barato de "dá para autenticar?": todas as env-vars presentes.
-
-    Não faz chamada de rede — o `acesso_ok` real vem das falhas de login dentro
-    dos fluxos. Retorna (ok, mensagem_de_erro_ou_None).
-    """
-    faltando = [k for k in _ENV_KEYS[sistema] if not (env.get(k) or "").strip()]
-    if faltando:
-        return False, f"env ausente: {', '.join(faltando)}"
-    return True, None
+# Sistemas cuja falha vira alerta para a operação. O ERP entrou quando o
+# FLUXO 4 (crawler/flow/reconcile_erp_flow.py) passou a existir de verdade —
+# NOTA: o alerta de fato depende também de `dim_sistema.critico` no banco
+# (dado, não código — ver domain/service/sistema_service.py::verificar);
+# atualizar a linha do erp_catapult lá para isto valer na prática.
+CRITICOS: frozenset[str] = frozenset(s for s in Sistema)

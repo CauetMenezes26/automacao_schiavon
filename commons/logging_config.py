@@ -1,37 +1,3 @@
-"""Configuração de log padrão do RPA.
-
-Equivalente Python do `log4j2.xml` + `.cursor/rules/logs-rpa.mdc` do rpa-modelo.
-Hoje o projeto usa `print()` com `✓ ✗ ⚠` espalhado; a Fase 5 troca isso por
-`logging`. Este módulo já deixa o padrão pronto.
-
-Chamada única, no bootstrap (`main.py` / `crawler/controller.py`):
-
-    from commons.logging_config import configurar_logs
-    configurar_logs()                          # console, nível INFO
-    configurar_logs("DEBUG", ARQUIVO_LOG)      # console + arquivo rotativo
-
-Nos demais módulos:
-
-    from commons.logging_config import get_logger
-    log = get_logger(__name__)
-    log.info("Coleta iniciada - configs: %d", len(configs))
-
-Regras (ver `.cursor/rules/logs-rpa.mdc`):
-
-* Níveis: INFO fluxo normal · DEBUG detalhe de troubleshooting · WARNING
-  situação anômala recuperável (retry, dado inconsistente, BusinessException) ·
-  ERROR falha que impacta o processamento.
-* **Sem emoji e sem acentuação decorativa** — texto ASCII puro. Emoji quebra
-  parsing de log e encoding em terminal legado.
-* Placeholders `%s`/`%d`, nunca f-string ou concatenação: adia a formatação
-  para quando o nível está de fato habilitado.
-* Em `except`, use `log.exception("contexto - id: %s", id)` (registra a stack)
-  ou `log.error("...", exc_info=True)`. Nunca engula a exceção só com `pass`.
-* Log por camada: Controller só início/fim/erro geral · Flow etapas e métricas
-  · Service operações de dado e validação · Utils detalhe técnico de baixo
-  nível. Evite log dentro de loop item a item — logue a cada N ou só o resumo.
-"""
-
 from __future__ import annotations
 
 import logging

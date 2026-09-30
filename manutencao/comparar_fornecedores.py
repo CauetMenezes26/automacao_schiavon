@@ -16,8 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cotacao.quotation import compare_prices  # noqa: E402
-from utils.connection import load_env  # noqa: E402
-from utils.paths import ENV_PATH  # noqa: E402
+from domain.config import carregar_config  # noqa: E402
 
 
 def main() -> None:
@@ -26,7 +25,7 @@ def main() -> None:
                         help="id do quotation_request. Sem a flag, usa o ciclo aberto.")
     args = parser.parse_args()
 
-    compare_prices(load_env(ENV_PATH), request_id=args.ciclo)
+    compare_prices(carregar_config(), request_id=args.ciclo)
 
 
 if __name__ == "__main__":

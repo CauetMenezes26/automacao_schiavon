@@ -13,7 +13,7 @@ De-para das tabelas:
     meat_suppliers       -> dim_fornecedor
 
 O schema é **qualificado explicitamente**, mesmo com o `search_path` já apontando
-para o `dwschiavon2`. É cinto e suspensório: se o `.env` mudar por engano, a query
+para o `dwschiavon2`. É cinto e suspensório: se o profile mudar por engano, a query
 falha em vez de gravar no lugar errado em silêncio.
 
 Uma diferença de modelagem: `quotation_responses.status` (pending/sent/imported/
@@ -140,7 +140,7 @@ def create_quotation_request(conn, week_label: str, week_start, week_end) -> int
     percentual; o ciclo carrega as datas.
     """
     id_processo = proc.abrir(
-        conn, cod_tipo="cotacao", chave_natural=week_label, referencia=week_start,
+        conn, cod_tipo="cotacao", identificador_processo=week_label, dt_origem=week_start,
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -447,6 +447,21 @@ def fetch_sent_responses_by_supplier_phone(conn, request_id: int) -> dict[str, d
 # ---------------------------------------------------------------------------
 # Cobranças
 # ---------------------------------------------------------------------------
+
+def contar_cobrancas(conn, response_id: int) -> int:
+    """Quantas cobranças já foram registradas para este envio.
+
+    Vive aqui, e não em `cotacao/quotation.py`, porque o SQL do projeto passa
+    por `domain/service/` — lá era um `conn.cursor()` aberto direto no módulo
+    de aplicação, com o nome do schema escrito à mão.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT COUNT(*) FROM {SCHEMA}.fat_cotacao_cobranca WHERE id_envio = %s",
+            (response_id,),
+        )
+        return cur.fetchone()[0]
+
 
 def save_followup(
     conn, response_id: int, channel: str, message_sid: str | None = None,

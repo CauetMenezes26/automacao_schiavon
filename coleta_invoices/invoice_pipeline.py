@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
-from coleta_invoices.invoices_db import config_from_filename, save_invoice
-from .vision import (
+from commons.logging_config import get_logger
+from domain.service.invoice_service import config_from_filename, save_invoice
+from commons.vision import (
     BatchItem,
     collect_batch_results,
     read_invoice,
     submit_batch,
     wait_for_batch,
 )
+
+log = get_logger(__name__)
 
 
 def collect_items(conn, results: list[dict], download_dir: Path) -> list[BatchItem]:
@@ -42,11 +46,11 @@ def collect_items(conn, results: list[dict], download_dir: Path) -> list[BatchIt
             continue
         cfg = config_from_filename(fp.name)
         if cfg is None:
-            print(f"  ⚠ Arquivo órfão sem config reconhecido: {fp.name} (ignorado)")
+            log.warning("Arquivo orfao sem config reconhecido: %s (ignorado)", fp.name)
             continue
         config_id, config_name = cfg
         # Sem dependencia de execution_log: o proprio arquivo vira um caso.
-        print(f"  + Órfão incluído: {fp.name}")
+        log.info("+ Orfao incluido: %s", fp.name)
         items.append(BatchItem(
             file_path=fp,
             config_id=config_id,
@@ -57,7 +61,11 @@ def collect_items(conn, results: list[dict], download_dir: Path) -> list[BatchIt
 
 
 def _persist_and_move(conn, item: BatchItem, invoice_data, read_dir: Path) -> float:
-    """Salva invoice no banco, move o arquivo para read_dir. Retorna custo."""
+    """Salva invoice no banco, move o arquivo para read_dir. Retorna custo.
+
+    Arquivos são agrupados por dia de leitura, em `invoice_DD-MM-AAAA/`, para
+    não acumular tudo solto numa única pasta.
+    """
     header_id, n_items = save_invoice(
         conn,
         id_loja=item.config_id,
@@ -65,11 +73,12 @@ def _persist_and_move(conn, item: BatchItem, invoice_data, read_dir: Path) -> fl
         data=invoice_data,
         custo=invoice_data.cost_read,
     )
-    print(f"    ✓ header_id={header_id}  itens={n_items}  "
-          f"custo=${invoice_data.cost_read:.4f}")
-    dest = read_dir / item.file_path.name
+    log.info("header_id=%s itens=%s custo=$%.4f", header_id, n_items, invoice_data.cost_read)
+    day_dir = read_dir / f"invoice_{date.today().strftime('%d-%m-%Y')}"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    dest = day_dir / item.file_path.name
     item.file_path.rename(dest)
-    print(f"    → files/read_files/{item.file_path.name}")
+    log.info("-> files/read_files/%s/%s", day_dir.name, item.file_path.name)
     return invoice_data.cost_read
 
 
@@ -87,37 +96,38 @@ def process_invoices_batch(
     """
     items = collect_items(conn, results, download_dir)
     if not items:
-        print("\nNenhum arquivo para processar.")
+        log.info("Nenhum arquivo para processar.")
         return
 
-    print(f"\n{'='*60}")
-    print(f"Batch API — {len(items)} arquivo(s)  modelo={model}")
+    log.info("Batch API - %s arquivo(s) modelo=%s", len(items), model)
 
     batch_id, id_map = submit_batch(items, api_key, model)
     wait_for_batch(batch_id, api_key, poll_interval=20)
 
-    print("\n  Processando resultados...")
+    log.info("Processando resultados...")
     batch_results = collect_batch_results(batch_id, api_key, id_map, model)
 
     total_cost = 0.0
     read_dir.mkdir(parents=True, exist_ok=True)
 
     for item, invoice_data, error in batch_results:
-        print(f"\n  [{item.config_name}] {item.file_path.name}")
+        log.info("[%s] %s", item.config_name, item.file_path.name)
         if error or invoice_data is None:
-            print(f"    ✗ Erro: {error}")
+            log.error("Erro: %s", error)
             continue
-        print(f"    confiança : {invoice_data.reading_confidence:.0f}%  "
-              f"status={invoice_data.reading_status}")
+        log.info(
+            "confianca : %.0f%% status=%s",
+            invoice_data.reading_confidence, invoice_data.reading_status,
+        )
         if invoice_data.reading_notes:
-            print(f"    notas IA  : {invoice_data.reading_notes[:120]}")
+            log.info("notas IA : %s", invoice_data.reading_notes[:120])
         try:
             total_cost += _persist_and_move(conn, item, invoice_data, read_dir)
         except Exception as exc:
             conn.rollback()
-            print(f"    ✗ Erro ao gravar no banco: {exc}")
+            log.error("Erro ao gravar no banco: %s", exc)
 
-    print(f"\n  Custo total do batch: ${total_cost:.4f} USD")
+    log.info("Custo total do batch: $%.4f USD", total_cost)
 
 
 def process_invoices_sync(
@@ -134,30 +144,50 @@ def process_invoices_sync(
     """
     items = collect_items(conn, results, download_dir)
     if not items:
-        print("\nNenhum arquivo para processar.")
+        log.info("Nenhum arquivo para processar.")
         return
 
-    print(f"\n{'='*60}")
-    print(f"Síncrono — {len(items)} arquivo(s)  modelo={model}")
+    log.info("Sincrono - %s arquivo(s) modelo=%s", len(items), model)
 
     total_cost = 0.0
     read_dir.mkdir(parents=True, exist_ok=True)
 
     for item in items:
-        print(f"\n  [{item.config_name}] {item.file_path.name}")
-        try:
-            invoice_data = read_invoice(item.file_path, api_key, model)
-        except Exception as exc:
-            print(f"    ✗ Erro na leitura: {exc}")
-            continue
-        print(f"    confiança : {invoice_data.reading_confidence:.0f}%  "
-              f"status={invoice_data.reading_status}")
-        if invoice_data.reading_notes:
-            print(f"    notas IA  : {invoice_data.reading_notes[:120]}")
-        try:
-            total_cost += _persist_and_move(conn, item, invoice_data, read_dir)
-        except Exception as exc:
-            conn.rollback()
-            print(f"    ✗ Erro ao gravar no banco: {exc}")
+        total_cost += _ler_e_gravar_uma(conn, item, api_key, model, read_dir)
 
-    print(f"\n  Custo total: ${total_cost:.4f} USD")
+    log.info("invoices: custo total da leitura sincrona USD %.4f", total_cost)
+
+
+def _ler_e_gravar_uma(conn, item, api_key: str, model: str, read_dir: Path) -> float:
+    """Lê UMA nota e grava. Devolve o custo; 0.0 se falhou.
+
+    Laço de item: `except Exception` aqui é a rede de segurança que a
+    governança autoriza — uma nota ilegível não pode parar as outras. Ficava
+    como dois `try` dentro de `process_invoices_sync` (um da leitura, um da
+    gravação); separado, cada função tem um `try` e o laço fica legível.
+    """
+    log.info("invoices: [%s] %s", item.config_name, item.file_path.name)
+    try:
+        invoice_data = read_invoice(item.file_path, api_key, model)
+    except Exception as exc:  # noqa: BLE001 — ver docstring
+        log.error("invoices: falha na leitura de %s - %s", item.file_path.name, exc)
+        return 0.0
+
+    log.info("invoices: %s - confianca %.0f%% status=%s", item.file_path.name,
+             invoice_data.reading_confidence, invoice_data.reading_status)
+    if invoice_data.reading_notes:
+        log.info("invoices: %s - notas da IA: %s", item.file_path.name,
+                 invoice_data.reading_notes[:120])
+
+    return _gravar_uma(conn, item, invoice_data, read_dir)
+
+
+def _gravar_uma(conn, item, invoice_data, read_dir: Path) -> float:
+    """Persiste a nota lida. Devolve o custo; 0.0 e rollback se falhou."""
+    try:
+        return _persist_and_move(conn, item, invoice_data, read_dir)
+    except Exception as exc:  # noqa: BLE001 — laco de item
+        conn.rollback()
+        log.error("invoices: falha ao gravar %s no banco - %s",
+                  item.file_path.name, exc)
+        return 0.0

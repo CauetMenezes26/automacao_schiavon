@@ -15,6 +15,9 @@ from commons.paths import PRICE_QUOTE_DIR, READ_DIR
 from domain.model.cotacao import PriceRow
 from domain.service.cotacao_service import fetch_processo_do_ciclo
 from domain.service.processo_service import SCHEMA
+from commons.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -239,20 +242,23 @@ def import_price_file(
     Pipeline completo: lê o Excel e persiste no banco.
     Retorna a quantidade de linhas importadas.
     """
-    print(f"  Lendo: {file_path.name}")
+    log.info("Lendo: %s", file_path.name)
     rows = read_price_excel(file_path)
 
     suppliers = {r.supplier for r in rows}
-    print(f"    {len(rows)} linha(s) em {len(suppliers)} aba(s): {', '.join(sorted(suppliers))}")
+    log.info(
+        "%s linha(s) em %s aba(s): %s",
+        len(rows), len(suppliers), ', '.join(sorted(suppliers)),
+    )
 
     inserted = save_price_quotes(conn, rows)
-    print(f"    ✓ {inserted} linha(s) gravada(s) em price_quote")
+    log.info("%s linha(s) gravada(s) em price_quote", inserted)
 
     READ_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dest = READ_DIR / f"{timestamp}_{file_path.name}"
     file_path.rename(dest)
-    print(f"    → files/read_files/{dest.name}")
+    log.info("-> files/read_files/%s", dest.name)
 
     return inserted
 
@@ -271,18 +277,17 @@ def import_all_price_files(
         if f.is_file() and f.suffix.lower() in (".xlsx", ".xls")
     )
     if not files:
-        print(f"  Nenhum arquivo Excel encontrado em {directory}")
+        log.info("Nenhum arquivo Excel encontrado em %s", directory)
         return 0
 
-    print(f"\n{'='*60}")
-    print(f"Price Quotes — {len(files)} arquivo(s) em {directory.name}/")
+    log.info("Price Quotes - %s arquivo(s) em %s/", len(files), directory.name)
 
     total = 0
     for file_path in files:
         try:
             total += import_price_file(file_path, conn)
         except Exception as exc:
-            print(f"    ✗ Erro em {file_path.name}: {exc}")
+            log.error("Erro em %s: %s", file_path.name, exc)
 
-    print(f"\n  Total importado: {total} linha(s)")
+    log.info("Total importado: %s linha(s)", total)
     return total

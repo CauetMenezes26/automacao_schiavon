@@ -4,24 +4,23 @@ Um caso é um arquivo de nota **ou** um ciclo de cotação. Esta é a única por
 de escrita em `processo`: os três fluxos passam por aqui, e é isso que impede
 cada um de inventar sua própria regra de status e percentual.
 
-O status nunca é escolhido à mão. Sai de `estado_apos` / `estado_falha`
-(`utils.status_exec`), que derivam do `EtapaEnum`: a última etapa do fluxo fecha
-o caso como FINALIZADO, as outras deixam EM_ANDAMENTO, e uma etapa que falha
-não avança o percentual.
+O status nunca é escolhido à mão. Sai de `status_apos_concluir`
+(`domain.enums`), que deriva da `Etapa`: a última etapa do fluxo fecha o caso
+como FINALIZADO, as outras deixam EM_ANDAMENTO. O percentual sai da própria
+etapa — `percentual_concluido` quando ela termina bem, `percentual_anterior`
+quando falha, porque uma etapa que falhou não avança o caso.
 """
 
 from __future__ import annotations
 
 from datetime import date
 
+import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from domain.enums import (
-    EtapaEnum,
-    StatusExecEnum,
-    estado_apos,
-    estado_falha,
-)
+from commons.db import reverter
+from commons.exception import DataAccessException
+from domain.enums import Etapa, StatusExecucao, status_apos_concluir
 
 # Qualificado de propósito: a migração é por fluxo, e o resto do sistema ainda
 # roda no dwschiavon via search_path. Um lugar só para mudar quando terminar.
@@ -41,13 +40,13 @@ __all__ = [
 def abrir(
     conn,
     cod_tipo: str,
-    chave_natural: str,
+    identificador_processo: str,
     id_loja: int | None = None,
-    referencia: date | None = None,
+    dt_origem: date | None = None,
 ) -> int:
     """Abre o caso, ou recupera o que já existe. Retorna o id.
 
-    Idempotente pela chave natural: rodar de novo o mesmo arquivo (ou a mesma
+    Idempotente pelo identificador do processo: rodar de novo o mesmo arquivo (ou a mesma
     semana) não cria um caso duplicado — incrementa `tentativas`. É o que
     permite reprocessar sem sujar o banco.
     """
@@ -55,16 +54,16 @@ def abrir(
         cur.execute(
             f"""
             INSERT INTO {SCHEMA}.processo
-                (cod_tipo, chave_natural, id_loja, referencia,
+                (cod_tipo, identificador_processo, id_loja, dt_origem,
                  cod_status, status_exec, percent_exec, tentativas)
             VALUES (%s, %s, %s, %s, %s, %s, 0, 1)
-            ON CONFLICT (cod_tipo, chave_natural) DO UPDATE
+            ON CONFLICT (cod_tipo, identificador_processo) DO UPDATE
                SET tentativas    = {SCHEMA}.processo.tentativas + 1,
                    atualizado_em = now() AT TIME ZONE 'America/Sao_Paulo'
             RETURNING id
             """,
-            (cod_tipo, chave_natural, id_loja, referencia,
-             int(StatusExecEnum.PENDENTE), StatusExecEnum.PENDENTE.name),
+            (cod_tipo, identificador_processo, id_loja, dt_origem,
+             int(StatusExecucao.PENDENTE), StatusExecucao.PENDENTE.name),
         )
         id_processo = cur.fetchone()[0]
     conn.commit()
@@ -73,66 +72,72 @@ def abrir(
 
 def _marcar(conn, id_processo, etapa, status, percent, mensagem, custo) -> None:
     """Grava etapa, status e percentual de uma vez. O custo é acumulado."""
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""
-            UPDATE {SCHEMA}.processo
-               SET cod_etapa     = %s,
-                   etapa_exec    = %s,
-                   cod_status    = %s,
-                   status_exec   = %s,
-                   percent_exec  = %s,
-                   mensagem      = %s,
-                   custo_usd     = COALESCE(custo_usd, 0) + COALESCE(%s, 0),
-                   atualizado_em = now() AT TIME ZONE 'America/Sao_Paulo'
-             WHERE id = %s
-            """,
-            (int(etapa), etapa.name, int(status), status.name, percent,
-             mensagem, custo, id_processo),
-        )
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE {SCHEMA}.processo
+                   SET cod_etapa     = %s,
+                       etapa_exec    = %s,
+                       cod_status    = %s,
+                       status_exec   = %s,
+                       percent_exec  = %s,
+                       mensagem      = %s,
+                       "custo_total_IA" = COALESCE("custo_total_IA", 0) + COALESCE(%s, 0),
+                       atualizado_em = now() AT TIME ZONE 'America/Sao_Paulo'
+                 WHERE id = %s
+                """,
+                (int(etapa), etapa.name, int(status), status.name, percent,
+                 mensagem, custo, id_processo),
+            )
+        conn.commit()
+    except psycopg2.Error as exc:
+        reverter(conn)
+        raise DataAccessException(
+            f"falha ao gravar status do processo id={id_processo}"
+        ) from exc
 
 
 def concluir_etapa(
     conn,
     id_processo: int,
-    etapa: EtapaEnum,
+    etapa: Etapa,
     com_alerta: bool = False,
     custo: float | None = None,
-) -> StatusExecEnum:
+) -> StatusExecucao:
     """Registra a etapa como concluída. Retorna o status resultante.
 
     `com_alerta` só tem efeito na última etapa do fluxo: fecha o caso como
     FINALIZADO_COM_ALERTA em vez de FINALIZADO, quando algo ficou para conferir.
     """
-    status, percent = estado_apos(etapa, com_alerta)
-    _marcar(conn, id_processo, etapa, status, percent, None, custo)
+    status = status_apos_concluir(etapa, com_alerta)
+    _marcar(conn, id_processo, etapa, status, etapa.percentual_concluido, None, custo)
     return status
 
 
 def aguardar_etapa(
     conn,
     id_processo: int,
-    etapa: EtapaEnum,
-    status: StatusExecEnum = StatusExecEnum.AGUARDANDO_RESPOSTA,
+    etapa: Etapa,
+    status: StatusExecucao = StatusExecucao.AGUARDANDO_RESPOSTA,
 ) -> None:
     """Marca o caso como parado à espera de algo externo.
 
-    O percentual é o da etapa: ela fez o que podia, quem falta é o fornecedor.
+    O percentual é o da etapa concluída: ela fez o que podia, quem falta é o
+    fornecedor.
     """
-    _marcar(conn, id_processo, etapa, status, etapa.percent_exec, None, None)
+    _marcar(conn, id_processo, etapa, status, etapa.percentual_concluido, None, None)
 
 
 def falhar_etapa(
     conn,
     id_processo: int,
-    etapa: EtapaEnum,
-    status: StatusExecEnum,
+    etapa: Etapa,
+    status: StatusExecucao,
     mensagem: str | None = None,
 ) -> None:
     """Registra a falha. O percentual fica no da etapa anterior."""
-    status, percent = estado_falha(etapa, status)
-    _marcar(conn, id_processo, etapa, status, percent,
+    _marcar(conn, id_processo, etapa, status, etapa.percentual_anterior,
             (mensagem or "")[:2000] or None, None)
 
 
@@ -163,18 +168,18 @@ def registrar_contagem(
     conn.commit()
 
 
-def buscar(conn, cod_tipo: str, chave_natural: str) -> dict | None:
-    """Recupera o caso pela chave natural, ou None."""
+def buscar(conn, cod_tipo: str, identificador_processo: str) -> dict | None:
+    """Recupera o caso pelo identificador, ou None."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             f"""
-            SELECT id, cod_tipo, chave_natural, id_loja, referencia,
+            SELECT id, cod_tipo, identificador_processo, id_loja, dt_origem,
                    cod_etapa, etapa_exec, cod_status, status_exec,
-                   percent_exec, tentativas, mensagem, custo_usd
+                   percent_exec, tentativas, mensagem, "custo_total_IA"
               FROM {SCHEMA}.processo
-             WHERE cod_tipo = %s AND chave_natural = %s
+             WHERE cod_tipo = %s AND identificador_processo = %s
             """,
-            (cod_tipo, chave_natural),
+            (cod_tipo, identificador_processo),
         )
         row = cur.fetchone()
     return dict(row) if row else None

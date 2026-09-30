@@ -1,2 +1,36 @@
-.claude
-.cursor
+# Bytecode e caches do Python — gerado, nunca versionado.
+__pycache__/
+*.pyc
+
+# Dados operacionais do cliente: invoices lidas, planilhas de cotacao,
+# relatorios gerados e registro de mensageria. Sao DADOS de negocio, nao
+# codigo — cada execucao os reescreve, e nenhum deles se reconstroi a partir
+# do repo. As pastas nao precisam existir no clone: todo caminho de escrita
+# faz `mkdir(parents=True, exist_ok=True)` (ver commons/paths.py).
+files/
+
+# Notas e documentos locais. README.md e a excecao: e entregavel do
+# Definition of Done (.claude/rules/governanca.md), entao acompanha o repo.
+*.md
+!README.md
+*.docx
+*.pdf
+*.xlsx
+
+# Configuracao local do Claude Code fica de fora, menos as rules do projeto:
+# a rule-mae da governanca acompanha o repo, e nao vale so na maquina de quem
+# escreveu. O `**` e necessario porque `*.md` acima ja pegaria os arquivos
+# dentro da pasta — a negacao vem depois, e a ultima regra que casa vence.
+.claude/*
+!.claude/rules/
+!.claude/rules/**
+
+# Segredos e credenciais — profile local e chaves de OAuth.
+resources/.env
+resources/config-*.env
+client_secret*.json
+*token*.json
+service_account*.json
+
+# Saida avulsa do FLUXO 2 (crawler/flow/invoices_flow.py).
+resultado.json
