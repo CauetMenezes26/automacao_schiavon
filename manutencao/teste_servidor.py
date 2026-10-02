@@ -17,6 +17,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from commons.datas import fixar_fuso
 from commons.db import conexao
 from commons.logging_config import configurar_logs, get_logger
 from commons.paths import FILES_DIR, ROOT
@@ -217,6 +218,7 @@ def main() -> None:
     parser.add_argument("--login", action="store_true", help="login real SharePoint/Catapult")
     args = parser.parse_args()
 
+    fixar_fuso()
     configurar_logs()
     config = carregar_config()
     resultados = rodar(config, email=args.email, login=args.login)
