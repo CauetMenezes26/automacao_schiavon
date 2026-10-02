@@ -84,3 +84,19 @@ def test_preencher_usuario_redigita_se_o_fill_nao_registrou():
     page = type("P", (), {"locator": lambda self, sel: campo})()
     sp._preencher_usuario(page, "a@b.com")
     assert campo.digitado == "a@b.com" and campo.valor == "a@b.com"
+
+
+def test_texto_erro_visivel_so_devolve_se_visivel():
+    from commons import sharepoint as sp
+
+    class El:
+        def __init__(self, visivel): self.v = visivel
+        def is_visible(self): return self.v
+        def inner_text(self): return "senha errada"
+
+    def pagina(el):
+        return type("P", (), {"query_selector": lambda self, sel: el})()
+
+    assert sp._texto_erro_visivel(pagina(El(True)), "#passwordError") == "senha errada"
+    assert sp._texto_erro_visivel(pagina(El(False)), "#passwordError") == ""
+    assert sp._texto_erro_visivel(pagina(None), "#passwordError") == ""

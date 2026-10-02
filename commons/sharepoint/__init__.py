@@ -403,26 +403,48 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
         page.fill('input[name="passwd"]', password)
         page.click('input[type="submit"]')
 
-        page.wait_for_selector(
-            '#usernameError, #passwordError, #idBtn_Back, input[name="loginfmt"]',
-            timeout=30_000,
-        )
+        # Espera um DESFECHO real do envio da senha: saiu do portal, erro de
+        # senha ou o prompt "continuar conectado". Esperar tambem por
+        # `loginfmt`/`#usernameError` (que ficam no DOM da tela de senha)
+        # fazia a espera voltar na hora, antes de o portal processar o envio.
+        page.wait_for_function(_JS_DESFECHO_LOGIN, timeout=30_000)
 
     except PwTimeout as exc:
-        _debug_dump(page, "timeout_pos_submit")
+        recusa = _texto_erro_visivel(page, "#usernameError")
+        _debug_dump(page, "login_recusado" if recusa else "timeout_pos_submit")
+        if recusa:
+            raise SharePointLoginError(f"login recusado: {recusa}") from exc
         raise SharePointLoginError(
             f"portal de login não respondeu como esperado: {exc}") from exc
 
-    for sel in ("#usernameError", "#passwordError"):
-        el = page.query_selector(sel)
-        if el and el.is_visible():
-            _debug_dump(page, "login_recusado")
-            raise SharePointLoginError(f"login recusado: {el.inner_text()[:200]}")
+    recusa = _texto_erro_visivel(page, "#passwordError")
+    if recusa:
+        _debug_dump(page, "login_recusado")
+        raise SharePointLoginError(f"login recusado: {recusa}")
 
     _dismiss_kmsi_prompt(page)
     _confirmar_saida_do_portal(page)
 
     log.info("[login] Concluido.")
+
+
+# Desfecho do envio da senha: saiu do portal, ou erro de senha, ou prompt KMSI.
+_JS_DESFECHO_LOGIN = """() => {
+    const visivel = (sel) => {
+        const el = document.querySelector(sel);
+        return !!el && el.offsetParent !== null;
+    };
+    return !location.host.includes('login.microsoftonline.com')
+        || visivel('#passwordError') || visivel('#idBtn_Back');
+}"""
+
+
+def _texto_erro_visivel(page, seletor: str) -> str:
+    """Texto do elemento de erro se ele esta visivel; vazio caso contrario."""
+    el = page.query_selector(seletor)
+    if el and el.is_visible():
+        return el.inner_text()[:200]
+    return ""
 
 
 def _preencher_usuario(page, username: str) -> None:
