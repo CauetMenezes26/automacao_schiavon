@@ -169,6 +169,7 @@ flowchart TD
 | `python -m manutencao.catapult_inventory_scrape [windermere\|drphilips\|hq]` | Raspa o catálogo Inventory do Catapult → `dim_item_catapult` |
 | `python -m manutencao.teste_conciliacao_erp` | Teste manual ponta a ponta da conciliação ERP: login → busca PO por invoice → compara → imprime (não grava) |
 | `python -m manutencao.gmail_oauth_setup` | Autoriza a caixa Gmail que lê o OTP do Cloudflare Access |
+| `python -m manutencao.teste_servidor [--email] [--login]` | Smoke test do servidor (banco, Chromium, Claude, Sheets, Gmail, SMTP); somente leitura |
 | `python -m pytest` | Testes (motor de match e conciliação ERP, em memória, sem Postgres) |
 
 ## 7. Sustentação
