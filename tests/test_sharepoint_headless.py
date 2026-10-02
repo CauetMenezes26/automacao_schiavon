@@ -118,14 +118,18 @@ def test_login_com_credencial_vazia_falha_sem_abrir_o_portal():
 class _PaginaTelaSenha:
     """Pagina falsa: a tela de senha fica ativa depois de `envios_ate_ativar` reenvios."""
 
-    def __init__(self, envios_ate_ativar, erro_usuario=None):
+    def __init__(self, envios_ate_ativar, erro_usuario=None, valor_usuario="a@b.com"):
         self.envios_ate_ativar = envios_ate_ativar
         self.erro_usuario = erro_usuario
+        self.valor_usuario = valor_usuario
         self.chamadas = []
         self.digitado = None
 
     def wait_for_selector(self, sel, **k):
         self.chamadas.append(("sel", sel))
+
+    def wait_for_load_state(self, estado, timeout):
+        self.chamadas.append(("load", estado))
 
     def wait_for_function(self, js, timeout):
         from playwright.sync_api import TimeoutError as PwTimeout
@@ -140,6 +144,8 @@ class _PaginaTelaSenha:
         if sel == "#usernameError" and self.erro_usuario:
             return type("El", (), {"is_visible": lambda s: True,
                                    "inner_text": lambda s: self.erro_usuario})()
+        if sel == 'input[name="loginfmt"]':
+            return self.locator(sel)
         return None
 
     def locator(self, sel):
@@ -147,7 +153,11 @@ class _PaginaTelaSenha:
 
         class Campo:
             def fill(self, v): pass
-            def press_sequentially(self, v, delay=0): pagina.digitado = v
+            def is_visible(self): return True
+            def input_value(self): return pagina.valor_usuario
+            def press_sequentially(self, v, delay=0):
+                pagina.digitado = v
+                pagina.valor_usuario = v
         return Campo()
 
     def click(self, sel):
@@ -193,3 +203,22 @@ def test_aguardar_tela_senha_recusa_com_erro_de_usuario(monkeypatch):
     with pytest.raises(sp.SharePointLoginError, match="conta nao existe"):
         sp._aguardar_tela_senha(pagina, "a@b.com")
     assert pagina.digitado is None
+
+
+def test_erro_de_usuario_com_campo_vazio_nao_e_recusa_reenvia(monkeypatch):
+    """Visto no servidor: a pagina apagou o e-mail e mostrou 'e-mail invalido'."""
+    from commons import sharepoint as sp
+
+    monkeypatch.setattr(sp, "_debug_dump", lambda *a: None)
+    pagina = _PaginaTelaSenha(1, erro_usuario="Insira um email valido", valor_usuario="")
+    sp._aguardar_tela_senha(pagina, "a@b.com")
+    assert pagina.digitado == "a@b.com"
+
+
+def test_enviar_usuario_redigita_se_a_pagina_limpou_o_campo():
+    from commons import sharepoint as sp
+
+    pagina = _PaginaTelaSenha(0, valor_usuario="")  # fill nao fica: pagina limpa
+    sp._enviar_usuario(pagina, "a@b.com")
+    assert pagina.digitado == "a@b.com"
+    assert pagina.chamadas[-1] == ("click", "#idSIButton9")

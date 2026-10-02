@@ -483,7 +483,11 @@ def _aguardar_tela_senha(page, username: str) -> None:
     if not _tela_senha_ativa(page, 30_000):
         log.warning("[login] tela de senha sem #displayName em 30s; reenviando o usuario")
         _logar_campos_login(page)
-        recusa = _texto_erro_visivel(page, "#usernameError")
+        # Com o campo vazio, o "e-mail invalido" e do proprio robo (a pagina
+        # apagou o valor), nao recusa da conta: reenvia em vez de desistir.
+        recusa = ""
+        if _valor_campo(page, "loginfmt"):
+            recusa = _texto_erro_visivel(page, "#usernameError")
         if recusa:
             _debug_dump(page, "login_recusado")
             raise SharePointLoginError(f"login recusado: {recusa}")
@@ -527,6 +531,12 @@ def _logar_campos_login(page) -> None:
                      nome, campo.is_visible(), len(campo.input_value()))
 
 
+def _valor_campo(page, nome: str) -> str:
+    """Valor atual de um campo do login; vazio se o campo nao existe."""
+    campo = page.query_selector(f'input[name="{nome}"]')
+    return campo.input_value() if campo else ""
+
+
 def _texto_erro_visivel(page, seletor: str) -> str:
     """Texto do elemento de erro se ele esta visivel; vazio caso contrario."""
     el = page.query_selector(seletor)
@@ -561,13 +571,32 @@ def _enviar_usuario(page, username: str, digitar: bool = False) -> None:
     forca tecla a tecla (reenvio), que dispara os eventos que a pagina escuta.
     """
     page.wait_for_selector("#idSIButton9", state="visible", timeout=15_000)
+    _aguardar_pagina_estavel(page)
+    campo = page.locator('input[name="loginfmt"]')
     if digitar:
-        campo = page.locator('input[name="loginfmt"]')
         campo.fill("")
         campo.press_sequentially(username, delay=40)
     else:
         _preencher_usuario(page, username)
+    # Visto no servidor: o valor passa na conferencia do fill e a pagina o apaga
+    # logo depois, ao terminar de montar. Reconfere imediatamente antes do clique.
+    page.wait_for_timeout(1_000)
+    if campo.input_value() != username:
+        log.warning("[login] campo de usuario foi limpo pela pagina; digitando de novo")
+        campo.fill("")
+        campo.press_sequentially(username, delay=40)
     page.click("#idSIButton9")
+
+
+def _aguardar_pagina_estavel(page) -> None:
+    """Espera a rede do portal assentar (scripts que remontam o formulario).
+    Nunca levanta: o portal tem telemetria que pode nao deixar a rede parar."""
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except PwTimeout:
+        log.debug("[login] rede do portal nao assentou em 10s; seguindo")
 
 
 def _confirmar_saida_do_portal(page) -> None:
