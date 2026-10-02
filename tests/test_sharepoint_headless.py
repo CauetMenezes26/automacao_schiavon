@@ -104,6 +104,30 @@ def test_texto_erro_visivel_so_devolve_se_visivel():
     assert sp._texto_erro_visivel(pagina(None), "#passwordError") == ""
 
 
+def test_pasta_nao_encontrada_diz_o_nome_esperado_sem_listar_as_existentes(monkeypatch):
+    from datetime import date
+
+    import pytest
+    from commons import sharepoint as sp
+
+    def pasta(nome):
+        return {"name": nome, "type": "pasta", "server_relative_url": f"/r/{nome}"}
+
+    conteudo = {
+        "/r": [pasta("Invoices Fornecedores")],
+        "/r/Invoices Fornecedores": [pasta("2026")],
+        "/r/2026": [pasta("_Invoices para lançamento")],
+        "/r/_Invoices para lançamento": [pasta("08 AGO - 2026"), pasta("09 SET - 2026")],
+    }
+    monkeypatch.setattr(sp, "get_folder_contents", lambda ctx, site, caminho, base: conteudo[caminho])
+
+    with pytest.raises(RuntimeError) as exc:
+        sp.navigate(None, "s", "b", "/r", sp.build_nav_steps(date(2026, 10, 2)))
+    msg = str(exc.value)
+    assert "10 OUT - 2026" in msg
+    assert "Dispon" not in msg and "09 SET" not in msg
+
+
 def test_login_com_credencial_vazia_falha_sem_abrir_o_portal():
     import types
 

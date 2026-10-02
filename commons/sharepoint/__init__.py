@@ -143,10 +143,18 @@ def build_nav_steps(reference: date | None = None) -> list[Step]:
     return [
         "Invoices Fornecedores",
         current_year_folder(ref),
-        resolve_invoices_launch_folder,
-        lambda entries: resolve_month_folder(entries, ref),
-        lambda entries: resolve_week_folder(entries, ref),
+        _passo(lambda entries: resolve_invoices_launch_folder(entries),
+               "_Invoices para lançamento"),
+        _passo(lambda entries: resolve_month_folder(entries, ref), current_month_folder(ref)),
+        _passo(lambda entries: resolve_week_folder(entries, ref), f"semana do dia {ref.day}"),
     ]
+
+
+def _passo(fn: Callable[[list[dict]], dict | None], esperado: str):
+    """Anota no passo-funcao o nome da pasta que ele procura, para o log de
+    "nao encontrada" dizer O QUE faltou."""
+    fn.esperado = esperado
+    return fn
 
 
 # ---------------------------------------------------------------------------
@@ -236,19 +244,15 @@ def navigate(context, site_url: str, base: str, root_path: str, steps: list[Step
         entries = get_folder_contents(context, site_url, current_path, base)
         if callable(step):
             match = step(entries)
-            label = match["name"] if match else "(não encontrado)"
+            esperado = getattr(step, "esperado", "pasta esperada")
         else:
-            label = step
             match = next((e for e in entries if e["name"].lower() == step.lower()), None)
-
-        log.info("-> %s", label)
+            esperado = step
 
         if match is None:
-            available = ", ".join(e["name"] for e in entries) or "(vazio)"
-            raise RuntimeError(
-                f"Pasta '{label}' não encontrada em '{current_path}'.\n"
-                f"      Disponíveis: {available}"
-            )
+            log.info("-> %s (nao encontrada)", esperado)
+            raise RuntimeError(f"Pasta '{esperado}' nao encontrada em '{current_path}'.")
+        log.info("-> %s", match["name"])
         current_path = match["server_relative_url"]
 
     return current_path, get_folder_contents(context, site_url, current_path, base)
