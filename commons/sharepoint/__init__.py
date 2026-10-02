@@ -484,6 +484,9 @@ def _debug_dump(page, tag: str) -> None:
         with open(f"debug_{tag}_{ts}.html", "w", encoding="utf-8") as f:
             f.write(page.content())
         log.info("[debug] url no momento da falha: %s", page.url)
+        # Texto visivel da pagina: permite diagnosticar num servidor so de terminal.
+        texto = " ".join(page.inner_text("body").split())
+        log.info("[debug] texto da pagina: %s", texto[:600])
         log.info("[debug] screenshot salvo em debug_%s_%s.png", tag, ts)
     except Exception as e:
         log.error("[debug] falhou ao salvar dump: %s", e)
