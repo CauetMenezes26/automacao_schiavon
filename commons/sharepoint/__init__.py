@@ -793,21 +793,31 @@ def open_sharepoint_session(username: str, password: str, site_url: str, headles
     """
     Abre uma sessão Playwright autenticada no SharePoint.
     Retorna (playwright, browser, context, page) — o chamador deve fechar com browser.close().
+    Se o login falhar, fecha o navegador e para o Playwright antes de propagar o erro:
+    um `sync_playwright` que fica ativo deixa um loop asyncio na thread e a proxima
+    sessao Playwright do processo falha com "Sync API inside the asyncio loop".
     """
+    from commons.catapult import fechar_browser, parar_playwright
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=headless)
-    context = _novo_contexto(browser)
-    page = context.new_page()
+    browser = None
+    try:
+        browser = pw.chromium.launch(headless=headless)
+        context = _novo_contexto(browser)
+        page = context.new_page()
 
-    page.goto(site_url, wait_until="domcontentloaded", timeout=60_000)
-    _handle_microsoft_login(page, username, password)
+        page.goto(site_url, wait_until="domcontentloaded", timeout=60_000)
+        _handle_microsoft_login(page, username, password)
 
-    parsed = urlparse(site_url)
-    if parsed.netloc not in page.url:
-        page.wait_for_url(f"**{parsed.netloc}**", timeout=60_000)
-    page.wait_for_load_state("load", timeout=60_000)
+        parsed = urlparse(site_url)
+        if parsed.netloc not in page.url:
+            page.wait_for_url(f"**{parsed.netloc}**", timeout=60_000)
+        page.wait_for_load_state("load", timeout=60_000)
+    except Exception:
+        fechar_browser(browser)
+        parar_playwright(pw)
+        raise
     log.info("[login] Sessao SharePoint aberta.")
 
     return pw, browser, context, page
