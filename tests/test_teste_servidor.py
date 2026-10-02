@@ -5,7 +5,7 @@ from __future__ import annotations
 from domain.config import Config
 from manutencao import teste_servidor as ts
 
-BANCO = {"HOST": "h", "PORT": "5432", "DATABASE": "d", "USER": "u", "PASSWORD": "p"}
+BANCO = {"HOST": "h", "PORT": "5432", "DATABASE": "d", "USER_GUVI": "u", "PASSWORD_GUVI": "p"}
 
 
 def _cfg(**extra) -> Config:

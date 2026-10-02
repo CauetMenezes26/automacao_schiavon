@@ -46,7 +46,7 @@ _FALSO = frozenset({"0", "false", "f", "no", "n", "nao", "não"})
 
 # Chaves sem as quais nao ha conexao. Conferidas juntas, para a mensagem dizer
 # TODAS as que faltam de uma vez.
-_CHAVES_BANCO = ("HOST", "PORT", "DATABASE", "USER", "PASSWORD")
+_CHAVES_BANCO = ("HOST", "PORT", "DATABASE", "USER_GUVI", "PASSWORD_GUVI")
 
 
 @dataclass(frozen=True)
@@ -155,7 +155,7 @@ class Config:
             ambiente=ambiente,
             banco=ConfigBanco(
                 host=txt("HOST"), port=txt("PORT"), database=txt("DATABASE"),
-                user=txt("USER"), password=valores["PASSWORD"],
+                user=txt("USER_GUVI"), password=valores["PASSWORD_GUVI"],
                 schema=txt("SCHEMA", "public"),
             ),
             sharepoint=Credencial(txt("SHAREPOINT_USERNAME"), txt("SHAREPOINT_PASSWORD")),

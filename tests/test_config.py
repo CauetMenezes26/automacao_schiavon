@@ -13,7 +13,7 @@ from commons.exception import ConfigException
 from domain.config import Config, carregar_config
 from domain.sistemas import Sistema
 
-BANCO = {"HOST": "db.local", "PORT": "5432", "DATABASE": "rpa", "USER": "u", "PASSWORD": "s3nh4"}
+BANCO = {"HOST": "db.local", "PORT": "5432", "DATABASE": "rpa", "USER_GUVI": "u", "PASSWORD_GUVI": "s3nh4"}
 
 
 def _cfg(**extra: str) -> Config:
@@ -73,7 +73,7 @@ def test_chaves_de_banco_faltando_sao_listadas_de_uma_vez():
 
 def test_chave_de_banco_so_com_espacos_conta_como_faltando():
     with pytest.raises(ConfigException):
-        Config.de_valores({**BANCO, "USER": "   "})
+        Config.de_valores({**BANCO, "USER_GUVI": "   "})
 
 
 def test_config_minima_carrega_com_defaults():

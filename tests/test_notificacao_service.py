@@ -8,7 +8,7 @@ from commons.exception import ConfigException
 from domain.config import DESTINATARIOS_CLIENTE, Config
 from domain.service import notificacao_service as ns
 
-BANCO = {"HOST": "h", "PORT": "5432", "DATABASE": "d", "USER": "u", "PASSWORD": "p"}
+BANCO = {"HOST": "h", "PORT": "5432", "DATABASE": "d", "USER_GUVI": "u", "PASSWORD_GUVI": "p"}
 
 
 @pytest.fixture(autouse=True)
