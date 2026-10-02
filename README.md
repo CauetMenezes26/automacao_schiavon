@@ -80,77 +80,30 @@ Arquivos de credencial, também fora do git: `resources/google/service_account.j
 ## 5. Fluxograma Macro
 
 ```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "basis", "nodeSpacing": 40, "rankSpacing": 45}, "themeVariables": {"fontFamily": "Segoe UI, Roboto, sans-serif", "fontSize": "14px"}}}%%
 flowchart TD
-    CRON(["⏱ cron a cada 30 min<br/><i>flock evita execução dupla</i>"]):::inicio
-    MAIN["<b>main.py</b><br/>fuso America/Sao_Paulo<br/>profile RPA_ENV"]:::inicio
+    A[cron a cada 30 min] --> B[main.py<br/>fuso + profile]
+    B --> F1[1. Sinonimos<br/>Google Sheets para banco]
+    F1 --> F2[2. Invoices<br/>SharePoint + Claude Vision]
+    F2 --> F3[3. Conciliacao ERP<br/>Invoice x PO do Catapult]
+    F3 --> F4[4. Monitor<br/>acesso por sistema e alertas]
+    F4 --> F5[5. Painel<br/>painel_operacao.xlsx]
+    F5 --> Z[Heartbeat, e-mail de erro e resumo]
 
-    CRON --> MAIN --> F1
+    F2 -.-> COT[Cotacao semanal<br/>desativada]
 
-    subgraph PIPE ["🔄 Pipeline: cada fluxo roda isolado, falha de um não derruba os outros"]
-        direction TD
-        F1["<b>1 · Sinônimos</b><br/>Google Sheets → dim_item_sinonimo"]:::fluxo
-        F2["<b>2 · Invoices</b><br/>SharePoint → Claude Vision<br/>→ fat_invoice"]:::fluxo
-        COT["<b>Cotação semanal</b><br/>desativada por enquanto"]:::off
-        F3["<b>3 · Conciliação ERP</b><br/>Invoice × PO do Catapult"]:::nucleo
-        F4["<b>4 · Monitor</b><br/>acesso por sistema + alertas"]:::fluxo
-        F5["<b>5 · Painel</b><br/>painel_operacao.xlsx"]:::fluxo
-        F1 --> F2 --> COT -.-> F3 --> F4 --> F5
-    end
-
-    subgraph ERP ["🧾 Conciliação ERP, por nota"]
-        direction TD
-        S1["Seleciona notas ainda não conciliadas<br/><i>loja não avança de semana sem fechar a anterior</i>"]:::passo
-        D1{"Sem itens ou<br/>anotação de insumo?"}:::decisao
-        ENC["Encerra sem conciliar"]:::desvio
-        S2["Login Catapult<br/><i>Cloudflare Access + OTP do Gmail</i>"]:::passo
-        S3["Busca o PO pela Invoice Reference<br/><i>vários POs: vale o de mais itens casados</i>"]:::passo
-        D2{"PO encontrado?"}:::decisao
-        SEMPO["Fecha com alerta<br/>PO_NAO_ENCONTRADA"]:::desvio
-        S4["Casa item a item e compara<br/>quantidade e valor"]:::passo
-        D3{"Algum item<br/>diverge?"}:::decisao
-        R1["📄 .docx de <b>divergência</b>"]:::alerta
-        R2["📄 .docx de <b>sucesso</b>"]:::ok
-        S1 --> D1
-        D1 -- sim --> ENC
-        D1 -- não --> S2 --> S3 --> D2
-        D2 -- não --> SEMPO
-        D2 -- sim --> S4 --> D3
-        D3 -- sim --> R1
-        D3 -- não --> R2
-    end
-
-    F3 --> S1
-    R1 & R2 & SEMPO --> MAIL["✉️ <b>1 e-mail por invoice, uma única vez</b><br/>ao fim do fluxo, para DESTINATARIOS_CLIENTE"]:::ok
-
-    F5 --> FIM
-    MAIL --> FIM
-    ENC --> FIM
-    FIM(["<b>Fim da execução</b><br/>heartbeat · e-mail de erro consolidado<br/>· resumo OK/ERRO · exit 1 se falhou"]):::fim
-
-    classDef inicio fill:#1f6feb,stroke:#0b3d91,color:#ffffff,stroke-width:2px
-    classDef fluxo fill:#2d3748,stroke:#718096,color:#ffffff,stroke-width:1.5px
-    classDef nucleo fill:#1a7f4b,stroke:#0d4a2b,color:#ffffff,stroke-width:3px
-    classDef off fill:#e2e8f0,stroke:#a0aec0,color:#4a5568,stroke-dasharray:5 4
-    classDef passo fill:#ebf4ff,stroke:#4c8dff,color:#1a202c
-    classDef decisao fill:#fff4d6,stroke:#d69e2e,color:#1a202c,stroke-width:2px
-    classDef desvio fill:#fde8e6,stroke:#c53030,color:#1a202c
-    classDef alerta fill:#fbd38d,stroke:#dd6b20,color:#1a202c,stroke-width:2px
-    classDef ok fill:#c6f6d5,stroke:#2f855a,color:#1a202c,stroke-width:2px
-    classDef fim fill:#6b46c1,stroke:#3c2a7a,color:#ffffff,stroke-width:2px
-    style PIPE fill:none,stroke:#718096,stroke-dasharray:6 4
-    style ERP fill:none,stroke:#1a7f4b,stroke-dasharray:6 4
+    F3 --> N1{Nota sem itens ou<br/>com anotacao de insumo?}
+    N1 -->|sim| N2[Encerra sem conciliar]
+    N1 -->|nao| N3[Login no Catapult<br/>e busca do PO]
+    N3 --> N4{PO encontrado?}
+    N4 -->|nao| N5[Fecha com alerta<br/>PO_NAO_ENCONTRADA]
+    N4 -->|sim| N6[Compara quantidade e valor<br/>item a item]
+    N6 --> N7{Algum item diverge?}
+    N7 -->|sim| R1[.docx de divergencia]
+    N7 -->|nao| R2[.docx de sucesso]
+    R1 --> M[1 e-mail por invoice<br/>uma unica vez]
+    R2 --> M
+    N5 --> M
 ```
-
-| Cor | Significado |
-|---|---|
-| 🔵 Azul | Início da execução |
-| ⬛ Cinza escuro | Fluxo ativo |
-| 🟢 Verde escuro | Fluxo principal (Conciliação ERP) |
-| 🟡 Amarelo | Decisão |
-| 🔴 Vermelho claro | Desvio: a nota encerra ou fecha com alerta |
-| 🟠 Laranja / 🟢 Verde claro | Relatório de divergência / de sucesso |
-| 🟣 Roxo | Fim da execução |
 
 ## 6. Regras de Negócio
 
