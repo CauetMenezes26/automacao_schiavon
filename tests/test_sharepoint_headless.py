@@ -113,3 +113,32 @@ def test_login_com_credencial_vazia_falha_sem_abrir_o_portal():
     pagina = types.SimpleNamespace(url="https://login.microsoftonline.com/x")
     with pytest.raises(sp.SharePointLoginError, match="USER_GUVI"):
         sp._handle_microsoft_login(pagina, "", "senha")
+
+
+def test_aguardar_tela_senha_espera_o_marcador_e_segue_se_ele_nao_vem():
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    from commons import sharepoint as sp
+
+    chamadas = []
+
+    class Pagina:
+        def __init__(self, marcador_ok):
+            self.marcador_ok = marcador_ok
+
+        def wait_for_selector(self, sel, timeout):
+            chamadas.append(("sel", sel))
+
+        def wait_for_function(self, js, timeout):
+            chamadas.append(("fn", js))
+            if not self.marcador_ok:
+                raise PwTimeout("sem displayName")
+
+        def wait_for_timeout(self, ms):
+            chamadas.append(("pausa", ms))
+
+    sp._aguardar_tela_senha(Pagina(True))
+    assert ("fn", sp._JS_TELA_SENHA) in chamadas
+    chamadas.clear()
+    sp._aguardar_tela_senha(Pagina(False))  # nao levanta: segue com aviso
+    assert ("pausa", 500) in chamadas

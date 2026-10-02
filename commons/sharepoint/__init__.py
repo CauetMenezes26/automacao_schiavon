@@ -412,7 +412,7 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
         _preencher_usuario(page, username)
         page.keyboard.press("Enter")
 
-        page.wait_for_selector('input[name="passwd"]', timeout=15_000)
+        _aguardar_tela_senha(page)
         _preencher_campo(page, 'input[name="passwd"]', password)
         page.click('input[type="submit"]')
 
@@ -459,6 +459,30 @@ _JS_DESFECHO_LOGIN = """() => {
     return !location.host.includes('login.microsoftonline.com')
         || visivel('#passwordError') || visivel('#idBtn_Back');
 }"""
+
+
+# Tela de senha de verdade: mostra o e-mail do usuario em #displayName. O input
+# `passwd` ja conta como visivel na tela do usuario, entao esperar so por ele deixa
+# o robo preencher/clicar antes da transicao (servidor lento) e o portal recebe o
+# formulario sem usuario (AADSTS90100: login parameter is empty).
+_JS_TELA_SENHA = """() => {
+    const nome = document.querySelector('#displayName');
+    const senha = document.querySelector('input[name="passwd"]');
+    return !!nome && nome.innerText.trim().length > 0
+        && !!senha && senha.offsetParent !== null;
+}"""
+
+
+def _aguardar_tela_senha(page) -> None:
+    """Espera a tela de senha ativa; se o marcador nao aparecer, segue com aviso."""
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    page.wait_for_selector('input[name="passwd"]', timeout=15_000)
+    try:
+        page.wait_for_function(_JS_TELA_SENHA, timeout=30_000)
+    except PwTimeout:
+        log.warning("[login] tela de senha sem #displayName em 30s; seguindo mesmo assim")
+    page.wait_for_timeout(500)
 
 
 def _aguardar_desfecho(page, timeout_ms: int) -> bool:
