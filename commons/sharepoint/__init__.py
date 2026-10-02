@@ -23,7 +23,16 @@ VIEWPORT = {"width": 1920, "height": 945}
 
 def _novo_contexto(browser):
     """Contexto do SharePoint: viewport fixo e downloads habilitados."""
-    return browser.new_context(viewport=VIEWPORT, accept_downloads=True)
+    return browser.new_context(
+        viewport=VIEWPORT, accept_downloads=True,
+        locale="pt-BR", timezone_id="America/Sao_Paulo",
+    )
+
+
+def _lancar_chromium(pw, headless: bool):
+    """Headless usa o Chromium completo (channel chromium), como o Catapult: o
+    headless-shell padrao e mais facil de a Microsoft tratar como bot."""
+    return pw.chromium.launch(headless=headless, channel="chromium" if headless else None)
 
 
 # Step: nome de pasta (str) ou função que recebe a listagem e retorna a pasta
@@ -872,7 +881,7 @@ def open_sharepoint_session(username: str, password: str, site_url: str, headles
     pw = sync_playwright().start()
     browser = None
     try:
-        browser = pw.chromium.launch(headless=headless)
+        browser = _lancar_chromium(pw, headless)
         context = _novo_contexto(browser)
         page = context.new_page()
 
@@ -920,7 +929,7 @@ def process_all_configs(
     results = []
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        browser = _lancar_chromium(pw, headless)
         context = _novo_contexto(browser)
         page = context.new_page()
 
