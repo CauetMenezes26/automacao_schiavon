@@ -425,6 +425,7 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
             # Nunca reenvia as cegas: um Enter com o campo vazio gera "Digite sua senha".
             log.warning("[login] senha enviada sem resposta em 10s; conferindo o campo")
             _logar_campos_login(page)
+            _debug_dump(page, "sem_resposta")
             _preencher_campo(page, 'input[name="passwd"]', password)
             page.click('input[type="submit"]')
             page.wait_for_function(_JS_DESFECHO_LOGIN, timeout=30_000)
@@ -482,6 +483,7 @@ def _aguardar_tela_senha(page) -> None:
         page.wait_for_function(_JS_TELA_SENHA, timeout=30_000)
     except PwTimeout:
         log.warning("[login] tela de senha sem #displayName em 30s; seguindo mesmo assim")
+        _debug_dump(page, "tela_senha")
     page.wait_for_timeout(500)
 
 
