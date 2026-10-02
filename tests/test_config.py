@@ -115,7 +115,7 @@ def test_url_da_loja_por_id():
 def test_segredos_ficam_fora_do_repr():
     c = _cfg(ECRS_PASSWORD="segredo-erp", AUTH_TOKEN="tok-twilio",
              SMTP_PASSWORD="segredo-smtp", schiavon_key_vision="sk-vision",
-             SHAREPOINT_PASSWORD="segredo-sp")
+             PASSWORD_GUVI="segredo-sp")
     texto = repr(c)
     for segredo in ("s3nh4", "segredo-erp", "tok-twilio", "segredo-smtp",
                     "sk-vision", "segredo-sp"):

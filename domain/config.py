@@ -116,9 +116,9 @@ class Config:
         # esta configurada" que da para enxergar daqui.
         tabela = {
             Sistema.SHAREPOINT_WINDERMERE: (
-                ("SHAREPOINT_USERNAME", sp.usuario), ("SHAREPOINT_PASSWORD", sp.senha)),
+                ("USER_GUVI", sp.usuario), ("PASSWORD_GUVI", sp.senha)),
             Sistema.SHAREPOINT_DRPHILLIPS: (
-                ("SHAREPOINT_USERNAME", sp.usuario), ("SHAREPOINT_PASSWORD", sp.senha)),
+                ("USER_GUVI", sp.usuario), ("PASSWORD_GUVI", sp.senha)),
             Sistema.TWILIO_WHATSAPP: (
                 ("ACCOUNT_SID", tw.account_sid), ("AUTH_TOKEN", tw.auth_token),
                 ("TWILIO_NUMBER", tw.numero), ("TWILIO_CONTENT_SID", tw.content_sid)),
@@ -158,7 +158,7 @@ class Config:
                 user=txt("USER"), password=valores["PASSWORD"],
                 schema=txt("SCHEMA", "public"),
             ),
-            sharepoint=Credencial(txt("SHAREPOINT_USERNAME"), txt("SHAREPOINT_PASSWORD")),
+            sharepoint=Credencial(txt("USER_GUVI"), txt("PASSWORD_GUVI")),
             sharepoint_cotacao=Credencial(
                 txt("SHAREPOINT_USERNAME2"), txt("SHAREPOINT_PASSWORD2")),
             vision=ConfigVision(
