@@ -402,6 +402,10 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
     if "login.microsoftonline.com" not in page.url:
         return
 
+    if not (username or "").strip() or not (password or "").strip():
+        raise SharePointLoginError(
+            "credencial do SharePoint vazia: confira USER_GUVI e PASSWORD_GUVI no profile")
+
     log.info("[login] Autenticando no Microsoft...")
     try:
         page.wait_for_selector('input[name="loginfmt"]', timeout=15_000)

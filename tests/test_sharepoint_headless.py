@@ -63,6 +63,8 @@ def test_login_que_falha_fecha_browser_e_para_playwright(monkeypatch):
         raise sp.SharePointLoginError("recusado")
 
     monkeypatch.setattr(sp, "_handle_microsoft_login", recusa)
+    import types
+
     import pytest
     with pytest.raises(sp.SharePointLoginError):
         sp.open_sharepoint_session("u", "s", "https://x.sharepoint.com/a")
@@ -100,3 +102,14 @@ def test_texto_erro_visivel_so_devolve_se_visivel():
     assert sp._texto_erro_visivel(pagina(El(True)), "#passwordError") == "senha errada"
     assert sp._texto_erro_visivel(pagina(El(False)), "#passwordError") == ""
     assert sp._texto_erro_visivel(pagina(None), "#passwordError") == ""
+
+
+def test_login_com_credencial_vazia_falha_sem_abrir_o_portal():
+    import types
+
+    import pytest
+    from commons import sharepoint as sp
+
+    pagina = types.SimpleNamespace(url="https://login.microsoftonline.com/x")
+    with pytest.raises(sp.SharePointLoginError, match="USER_GUVI"):
+        sp._handle_microsoft_login(pagina, "", "senha")
