@@ -396,7 +396,7 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
     log.info("[login] Autenticando no Microsoft...")
     try:
         page.wait_for_selector('input[name="loginfmt"]', timeout=15_000)
-        page.fill('input[name="loginfmt"]', username)
+        _preencher_usuario(page, username)
         page.keyboard.press("Enter")
 
         page.wait_for_selector('input[name="passwd"]', timeout=15_000)
@@ -405,7 +405,7 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
 
         page.wait_for_selector(
             '#usernameError, #passwordError, #idBtn_Back, input[name="loginfmt"]',
-            timeout=30_00,
+            timeout=30_000,
         )
 
     except PwTimeout as exc:
@@ -416,12 +416,28 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
     for sel in ("#usernameError", "#passwordError"):
         el = page.query_selector(sel)
         if el and el.is_visible():
+            _debug_dump(page, "login_recusado")
             raise SharePointLoginError(f"login recusado: {el.inner_text()[:200]}")
 
     _dismiss_kmsi_prompt(page)
     _confirmar_saida_do_portal(page)
 
     log.info("[login] Concluido.")
+
+
+def _preencher_usuario(page, username: str) -> None:
+    """Preenche o campo de usuario e confere que o valor ficou la.
+
+    Em headless/Linux o `fill` as vezes nao fica registrado pela pagina da
+    Microsoft (ela rejeita o envio com "Enter a valid email address..."). Se o
+    valor lido nao bate, limpa e digita tecla a tecla.
+    """
+    campo = page.locator('input[name="loginfmt"]')
+    campo.fill(username)
+    if campo.input_value() != username:
+        log.warning("[login] campo de usuario nao registrou o fill; digitando tecla a tecla")
+        campo.fill("")
+        campo.press_sequentially(username, delay=40)
 
 
 def _confirmar_saida_do_portal(page) -> None:

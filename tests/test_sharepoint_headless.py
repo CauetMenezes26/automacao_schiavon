@@ -67,3 +67,20 @@ def test_login_que_falha_fecha_browser_e_para_playwright(monkeypatch):
     with pytest.raises(sp.SharePointLoginError):
         sp.open_sharepoint_session("u", "s", "https://x.sharepoint.com/a")
     assert eventos == ["browser.close", "pw.stop"]
+
+
+def test_preencher_usuario_redigita_se_o_fill_nao_registrou():
+    from commons import sharepoint as sp
+
+    class Campo:
+        def __init__(self):
+            self.valor = ""
+            self.digitado = None
+        def fill(self, v): self.valor = "" if v == "" else ""  # fill nao "pega"
+        def input_value(self): return self.valor
+        def press_sequentially(self, v, delay=0): self.digitado = v; self.valor = v
+
+    campo = Campo()
+    page = type("P", (), {"locator": lambda self, sel: campo})()
+    sp._preencher_usuario(page, "a@b.com")
+    assert campo.digitado == "a@b.com" and campo.valor == "a@b.com"
