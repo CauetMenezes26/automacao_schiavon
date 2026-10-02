@@ -107,7 +107,7 @@ def _coletar(config: Config) -> None:
             referencia = r["referencia"]
             final_path = r["final_path"]
             error = r.get("error")
-            achados = len(r["entries"])
+            achados = _contar_arquivos(r["entries"])
             sistema = _SISTEMA_POR_LOJA.get(record["id"])
 
             id_coleta = abrir_coleta(conn, record["id"], referencia)
@@ -174,6 +174,12 @@ def _coletar(config: Config) -> None:
             encoding="utf-8",
         )
         log.info("Resultado salvo em: %s", output_file.name)
+
+
+def _contar_arquivos(entries: list[dict]) -> int:
+    """So arquivos soltos na pasta da semana contam; subpastas (LANCADAS,
+    PENDENCIAS...) sao ignoradas pela coleta (spec-coleta-arquivos-soltos)."""
+    return sum(1 for e in entries if e["type"] == "arquivo")
 
 
 coletar_invoices = invoices_flow
