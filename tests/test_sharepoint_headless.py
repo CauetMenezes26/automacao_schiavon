@@ -115,30 +115,81 @@ def test_login_com_credencial_vazia_falha_sem_abrir_o_portal():
         sp._handle_microsoft_login(pagina, "", "senha")
 
 
-def test_aguardar_tela_senha_espera_o_marcador_e_segue_se_ele_nao_vem():
-    from playwright.sync_api import TimeoutError as PwTimeout
+class _PaginaTelaSenha:
+    """Pagina falsa: a tela de senha fica ativa depois de `envios_ate_ativar` reenvios."""
 
+    def __init__(self, envios_ate_ativar, erro_usuario=None):
+        self.envios_ate_ativar = envios_ate_ativar
+        self.erro_usuario = erro_usuario
+        self.chamadas = []
+        self.digitado = None
+
+    def wait_for_selector(self, sel, **k):
+        self.chamadas.append(("sel", sel))
+
+    def wait_for_function(self, js, timeout):
+        from playwright.sync_api import TimeoutError as PwTimeout
+        self.chamadas.append(("fn", js))
+        if self.envios_ate_ativar > 0:
+            raise PwTimeout("sem displayName")
+
+    def wait_for_timeout(self, ms):
+        self.chamadas.append(("pausa", ms))
+
+    def query_selector(self, sel):
+        if sel == "#usernameError" and self.erro_usuario:
+            return type("El", (), {"is_visible": lambda s: True,
+                                   "inner_text": lambda s: self.erro_usuario})()
+        return None
+
+    def locator(self, sel):
+        pagina = self
+
+        class Campo:
+            def fill(self, v): pass
+            def press_sequentially(self, v, delay=0): pagina.digitado = v
+        return Campo()
+
+    def click(self, sel):
+        self.chamadas.append(("click", sel))
+        self.envios_ate_ativar -= 1
+
+
+def test_aguardar_tela_senha_segue_quando_o_marcador_vem():
     from commons import sharepoint as sp
 
-    chamadas = []
+    pagina = _PaginaTelaSenha(0)
+    sp._aguardar_tela_senha(pagina, "a@b.com")
+    assert ("fn", sp._JS_TELA_SENHA) in pagina.chamadas
+    assert ("pausa", 500) in pagina.chamadas
+    assert pagina.digitado is None
 
-    class Pagina:
-        def __init__(self, marcador_ok):
-            self.marcador_ok = marcador_ok
 
-        def wait_for_selector(self, sel, timeout):
-            chamadas.append(("sel", sel))
+def test_aguardar_tela_senha_reenvia_o_usuario_uma_vez(monkeypatch):
+    from commons import sharepoint as sp
 
-        def wait_for_function(self, js, timeout):
-            chamadas.append(("fn", js))
-            if not self.marcador_ok:
-                raise PwTimeout("sem displayName")
+    monkeypatch.setattr(sp, "_debug_dump", lambda *a: None)
+    pagina = _PaginaTelaSenha(1)
+    sp._aguardar_tela_senha(pagina, "a@b.com")
+    assert pagina.digitado == "a@b.com"
+    assert ("click", "#idSIButton9") in pagina.chamadas
 
-        def wait_for_timeout(self, ms):
-            chamadas.append(("pausa", ms))
 
-    sp._aguardar_tela_senha(Pagina(True))
-    assert ("fn", sp._JS_TELA_SENHA) in chamadas
-    chamadas.clear()
-    sp._aguardar_tela_senha(Pagina(False))  # nao levanta: segue com aviso
-    assert ("pausa", 500) in chamadas
+def test_aguardar_tela_senha_falha_em_vez_de_enviar_senha_na_tela_errada(monkeypatch):
+    import pytest
+    from commons import sharepoint as sp
+
+    monkeypatch.setattr(sp, "_debug_dump", lambda *a: None)
+    with pytest.raises(sp.SharePointLoginError, match="tela de senha"):
+        sp._aguardar_tela_senha(_PaginaTelaSenha(5), "a@b.com")
+
+
+def test_aguardar_tela_senha_recusa_com_erro_de_usuario(monkeypatch):
+    import pytest
+    from commons import sharepoint as sp
+
+    monkeypatch.setattr(sp, "_debug_dump", lambda *a: None)
+    pagina = _PaginaTelaSenha(5, erro_usuario="conta nao existe")
+    with pytest.raises(sp.SharePointLoginError, match="conta nao existe"):
+        sp._aguardar_tela_senha(pagina, "a@b.com")
+    assert pagina.digitado is None

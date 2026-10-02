@@ -409,10 +409,9 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
     log.info("[login] Autenticando no Microsoft...")
     try:
         page.wait_for_selector('input[name="loginfmt"]', timeout=15_000)
-        _preencher_usuario(page, username)
-        page.keyboard.press("Enter")
+        _enviar_usuario(page, username)
 
-        _aguardar_tela_senha(page)
+        _aguardar_tela_senha(page, username)
         _preencher_campo(page, 'input[name="passwd"]', password)
         page.click('input[type="submit"]')
 
@@ -474,17 +473,38 @@ _JS_TELA_SENHA = """() => {
 }"""
 
 
-def _aguardar_tela_senha(page) -> None:
-    """Espera a tela de senha ativa; se o marcador nao aparecer, segue com aviso."""
+def _aguardar_tela_senha(page, username: str) -> None:
+    """Espera a tela de senha ativa; reenvia o usuario uma vez e, se nao vier, falha.
+
+    Seguir para a senha na tela do usuario faz o portal receber o formulario sem
+    usuario (AADSTS90100), o que esconde a causa real.
+    """
+    page.wait_for_selector('input[name="passwd"]', timeout=15_000)
+    if not _tela_senha_ativa(page, 30_000):
+        log.warning("[login] tela de senha sem #displayName em 30s; reenviando o usuario")
+        _logar_campos_login(page)
+        recusa = _texto_erro_visivel(page, "#usernameError")
+        if recusa:
+            _debug_dump(page, "login_recusado")
+            raise SharePointLoginError(f"login recusado: {recusa}")
+        _enviar_usuario(page, username, digitar=True)
+        if not _tela_senha_ativa(page, 30_000):
+            _logar_campos_login(page)
+            _debug_dump(page, "tela_senha")
+            raise SharePointLoginError(
+                "portal nao avancou para a tela de senha apos enviar o usuario duas vezes")
+    page.wait_for_timeout(500)
+
+
+def _tela_senha_ativa(page, timeout_ms: int) -> bool:
+    """True se a tela de senha ficou ativa dentro do prazo; False se estourou."""
     from playwright.sync_api import TimeoutError as PwTimeout
 
-    page.wait_for_selector('input[name="passwd"]', timeout=15_000)
     try:
-        page.wait_for_function(_JS_TELA_SENHA, timeout=30_000)
+        page.wait_for_function(_JS_TELA_SENHA, timeout=timeout_ms)
     except PwTimeout:
-        log.warning("[login] tela de senha sem #displayName em 30s; seguindo mesmo assim")
-        _debug_dump(page, "tela_senha")
-    page.wait_for_timeout(500)
+        return False
+    return True
 
 
 def _aguardar_desfecho(page, timeout_ms: int) -> bool:
@@ -531,6 +551,23 @@ def _preencher_campo(page, seletor: str, valor: str) -> None:
 
 def _preencher_usuario(page, username: str) -> None:
     _preencher_campo(page, 'input[name="loginfmt"]', username)
+
+
+def _enviar_usuario(page, username: str, digitar: bool = False) -> None:
+    """Preenche o e-mail e clica em "Avancar".
+
+    Espera o botao visivel antes: com o servidor lento, preencher antes de a
+    pagina terminar de montar faz o valor nao chegar ao formulario. `digitar`
+    forca tecla a tecla (reenvio), que dispara os eventos que a pagina escuta.
+    """
+    page.wait_for_selector("#idSIButton9", state="visible", timeout=15_000)
+    if digitar:
+        campo = page.locator('input[name="loginfmt"]')
+        campo.fill("")
+        campo.press_sequentially(username, delay=40)
+    else:
+        _preencher_usuario(page, username)
+    page.click("#idSIButton9")
 
 
 def _confirmar_saida_do_portal(page) -> None:
