@@ -417,9 +417,12 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
         # `loginfmt`/`#usernameError` (que ficam no DOM da tela de senha)
         # fazia a espera voltar na hora, antes de o portal processar o envio.
         if not _aguardar_desfecho(page, 10_000):
-            # Clique nao surtiu efeito (visto em headless/Linux): reenvia com Enter.
-            log.warning("[login] senha enviada sem resposta em 10s; reenviando com Enter")
-            page.keyboard.press("Enter")
+            # Sem resposta (visto no servidor): o portal pode ter limpado o campo.
+            # Nunca reenvia as cegas: um Enter com o campo vazio gera "Digite sua senha".
+            log.warning("[login] senha enviada sem resposta em 10s; conferindo o campo")
+            _logar_campos_login(page)
+            _preencher_campo(page, 'input[name="passwd"]', password)
+            page.click('input[type="submit"]')
             page.wait_for_function(_JS_DESFECHO_LOGIN, timeout=30_000)
 
     except PwTimeout as exc:
@@ -433,6 +436,7 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
 
     recusa = _texto_erro_visivel(page, "#passwordError")
     if recusa:
+        _logar_campos_login(page)
         _debug_dump(page, "login_recusado")
         raise SharePointLoginError(f"login recusado: {recusa}")
 
