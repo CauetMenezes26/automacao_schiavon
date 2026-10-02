@@ -32,11 +32,15 @@ from domain.sistemas import Sistema
 
 __all__ = [
     "Config", "ConfigEcrs", "ConfigSmtp", "ConfigTwilio", "ConfigVision",
-    "Credencial", "carregar_config",
+    "Credencial", "DESTINATARIOS_CLIENTE", "carregar_config",
 ]
 
-# Em pt e en de proposito: quem edita o profile a mao escreve tanto "sim" quanto
-# "true".
+# Quem recebe os relatorios .docx da conciliacao (nao e segredo). BPO desligado
+DESTINATARIOS_CLIENTE = (
+    # "bpo@rokkasmarket.com",
+    "cauet.menezes@dataguvi.com.br",
+)
+
 _VERDADEIRO = frozenset({"1", "true", "t", "yes", "y", "sim", "s"})
 _FALSO = frozenset({"0", "false", "f", "no", "n", "nao", "não"})
 

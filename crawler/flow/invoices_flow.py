@@ -27,7 +27,7 @@ from domain.service.invoice_service import (
     registrar_navegacao,
     resolver_referencia_coleta,
 )
-from domain.service import sistema_service
+from domain.service import notificacao_service, sistema_service
 from domain.sistemas import Sistema
 
 log = get_logger(__name__)
@@ -119,10 +119,14 @@ def _coletar(config: Config) -> None:
                     sistema_service.registrar_acesso(conn, sistema, ok=True)
             elif r.get("error_tipo") == "login":
                 falhar_login(conn, id_coleta, str(error))
+                notificacao_service.registrar_erro(
+                    f"login SharePoint loja id={record['id']}", mensagem=str(error))
                 if sistema:
                     sistema_service.registrar_acesso(conn, sistema, ok=False, mensagem=str(error))
             else:
                 falhar_navegacao(conn, id_coleta, str(error))
+                notificacao_service.registrar_erro(
+                    f"navegacao SharePoint loja id={record['id']}", mensagem=str(error))
 
             label = "OK  " if r["status"] else "ERRO"
             log.info(
@@ -143,7 +147,7 @@ def _coletar(config: Config) -> None:
 
         process_all_configs(
             records, username, password, resolve_reference,
-            headless=False,
+            headless=True,
             keep_open=False,
             download_dir=DOWNLOAD_DIR,
             skip_dirs=[READ_DIR],
@@ -172,5 +176,4 @@ def _coletar(config: Config) -> None:
         log.info("Resultado salvo em: %s", output_file.name)
 
 
-# Compat: nome antigo da fachada.
 coletar_invoices = invoices_flow

@@ -7,6 +7,7 @@ from typing import Callable
 from commons.banner import fluxo
 from commons.logging_config import get_logger
 from crawler.reports.execution_report import ExecutionReport
+from domain.service import notificacao_service
 
 __all__ = ["Pipeline"]
 
@@ -29,11 +30,9 @@ class Pipeline:
         try:
             acao()
             estado = "OK"
-        except Exception as exc:  # noqa: BLE001 — um fluxo não pode derrubar os demais
-            # `log.exception` já traz o stack trace. Antes havia um
-            # `traceback.print_exc()` aqui MAIS o do `main.py`, e o mesmo
-            # traceback saía duas vezes, fora do logger.
+        except Exception as exc:
             log.exception("FLUXO %s/%s (%s) falhou: %s", numero, self.total, titulo, exc)
+            notificacao_service.registrar_erro(f"FLUXO {numero}/{self.total} {titulo}", exc)
             estado = "ERRO"
         self.report.registrar(numero, titulo, estado, time.perf_counter() - inicio)
         return estado

@@ -52,8 +52,9 @@ from conciliacao.reconcile_erp import (
     reconcile_items_against_po,
     tem_anotacao_insumo,
 )
-from conciliacao.relatorio_divergencia import gerar_relatorio_divergencia_erp
+from conciliacao.relatorio_divergencia import NOME_LOJA, gerar_relatorio_divergencia_erp
 from conciliacao.relatorio_sucesso import gerar_relatorio_sucesso_erp
+from domain.service import notificacao_service
 from domain.config import Config
 from domain.enums import Etapa, StatusExecucao as Status, e_erro_tecnico
 from domain.service import processo_service as proc
@@ -127,6 +128,7 @@ def reconcile_erp_flow(
             "sem_po": 0, "lojas_puladas": 0, "puladas_insumo": 0,
             "relatorios_gerados": 0, "relatorios_erro": 0, "notas_erro": 0,
             "sucessos_gerados": 0, "sucessos_erro": 0,
+            "relatorios_cliente": [],
         }
 
         sheet_id = config.sinonimos_sheet_id or None
@@ -159,6 +161,7 @@ def reconcile_erp_flow(
         )
         if totais["lojas_puladas"]:
             log.info("Lojas puladas (sem credencial/login): %s", totais['lojas_puladas'])
+        notificacao_service.enviar_relatorios_cliente(config, totais["relatorios_cliente"])
         return totais
 
     except BusinessException as exc:
@@ -246,10 +249,12 @@ def _conciliar_loja(
             )
     except IntegracaoException as exc:
         log.error("id_loja=%s: sessao do Catapult falhou - %s", id_loja, exc)
+        notificacao_service.registrar_erro(f"Catapult loja {id_loja}: login/sessao", exc)
         sistema_service.registrar_acesso(conn, Sistema.ERP_CATAPULT, ok=False, mensagem=str(exc))
         totais["lojas_puladas"] += 1
-    except DataAccessException:
+    except DataAccessException as exc:
         log.exception("id_loja=%s: falha de banco, loja interrompida", id_loja)
+        notificacao_service.registrar_erro(f"BD loja {id_loja}: loja interrompida", exc)
         totais["lojas_puladas"] += 1
     finally:
         _fechar_navegador(pw, browser)
@@ -285,13 +290,16 @@ def _conciliar_invoice(
         )
     except IntegracaoException as exc:
         log.error("nota %s: falha raspando o Catapult - %s", nota, exc)
+        notificacao_service.registrar_erro(f"Catapult nota {nota}: elemento/raspagem", exc)
         totais["notas_erro"] += 1
         _marcar_erro_navegacao(conn, header, str(exc))
-    except DataAccessException:
+    except DataAccessException as exc:
         log.exception("nota %s: falha de banco gravando a conciliacao", nota)
+        notificacao_service.registrar_erro(f"BD nota {nota}: gravando conciliacao", exc)
         totais["notas_erro"] += 1
-    except Exception:  # noqa: BLE001 — rede de seguranca do laco de item
+    except Exception as exc:  # noqa: BLE001 — rede de seguranca do laco de item
         log.exception("nota %s: erro inesperado na conciliacao", nota)
+        notificacao_service.registrar_erro(f"nota {nota}: erro inesperado", exc)
         totais["notas_erro"] += 1
 
 
@@ -511,6 +519,9 @@ def _gerar_relatorios(header: dict, resultado: dict, totais: dict) -> None:
     )
     totais["relatorios_erro"] += falhou
     totais["relatorios_gerados"] += divergencia is not None
+    if falhou:
+        notificacao_service.registrar_erro(f"relatorio .docx divergencia nota {nota}",
+                                           mensagem="falha gerando o .docx")
 
     sucesso, falhou = gerar_com_seguranca(
         lambda: gerar_relatorio_sucesso_erp(header, resultado),
@@ -518,6 +529,20 @@ def _gerar_relatorios(header: dict, resultado: dict, totais: dict) -> None:
     )
     totais["sucessos_erro"] += falhou
     totais["sucessos_gerados"] += sucesso is not None
+    if falhou:
+        notificacao_service.registrar_erro(f"relatorio .docx sucesso nota {nota}",
+                                           mensagem="falha gerando o .docx")
+    gerado = divergencia or sucesso
+    if gerado is not None:
+        itens = resultado["items"]
+        totais["relatorios_cliente"].append(notificacao_service.RelatorioNota(
+            invoice=str(nota or f"id{header['id']}"),
+            fornecedor=str(header.get("supplier_name") or "-"),
+            loja=NOME_LOJA.get(header.get("id_loja"), "-"),
+            divergencia=divergencia is not None,
+            caminho=gerado, itens=len(itens),
+            itens_divergentes=sum(1 for i in itens if i["has_issue"]),
+        ))
 
 
 def _sincronizar_pendentes(

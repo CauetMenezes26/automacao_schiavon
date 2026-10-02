@@ -36,12 +36,12 @@ from crawler.flow.reconcile_erp_flow import reconcile_erp_flow
 from crawler.flow.sinonimos_flow import sinonimos_flow
 from crawler.pipeline import Pipeline
 from domain.config import Config, carregar_config
-from domain.service import sistema_service
+from domain.service import notificacao_service, sistema_service
 from domain.service.agendamento_service import registrar_heartbeat
 
 log = get_logger(__name__)
 
-TOTAL_FLUXOS = 6
+TOTAL_FLUXOS = 5
 
 
 def executar() -> None:
@@ -74,7 +74,7 @@ def executar() -> None:
     # Avança UM passo do ciclo: abre a semana, ou verifica respostas e cobra
     # quem está atrasado. Não bloqueia.
     # ------------------------------------------------------------------
-    pipeline.rodar(3, "Cotação", lambda: cotacao_flow(config))
+    #pipeline.rodar(3, "Cotação", lambda: cotacao_flow(config))
 
     # ------------------------------------------------------------------
     # FLUXO 4/6 -- Conciliação invoice x PO do Catapult (ERP)
@@ -89,7 +89,7 @@ def executar() -> None:
     # guardada.
     # pipeline.rodar(4, "Conciliação", lambda: conciliacao_flow(config))
     # ------------------------------------------------------------------
-    pipeline.rodar(4, "Conciliação ERP", lambda: reconcile_erp_flow(config))
+    pipeline.rodar(3, "Conciliação ERP", lambda: reconcile_erp_flow(config))
 
     # ------------------------------------------------------------------
     # FLUXO 5/6 -- Monitor
@@ -97,7 +97,7 @@ def executar() -> None:
     # operação (e-mail à GUVI, com dedupe). Lê o que os fluxos acima
     # deixaram; não depende de nenhum ter dado certo.
     # ------------------------------------------------------------------
-    pipeline.rodar(5, "Monitor", lambda: monitor_flow(config))
+    pipeline.rodar(4, "Monitor", lambda: monitor_flow(config))
 
     # ------------------------------------------------------------------
     # FLUXO 6/6 -- Relatorio Cotacao x Invoice
@@ -106,11 +106,14 @@ def executar() -> None:
     # so as divergencias) - o relatorio que o cliente abre. So le do banco;
     # roda mesmo que os fluxos acima tenham falhado.
     # ------------------------------------------------------------------
-    pipeline.rodar(6, "Painel", lambda: painel_flow(config))
+    pipeline.rodar(5, "Painel", lambda: painel_flow(config))
 
     # Heartbeat do agendamento: registra esta execução e projeta a próxima
     # pela cron. Antes do resumo() porque ele sai com código 1.
     _gravar_heartbeat(config, pipeline.houve_erro)
+
+    # E-mail unico com todas as falhas da execucao (ver notificacao_service).
+    notificacao_service.enviar_erros(config)
 
     pipeline.resumo()
 

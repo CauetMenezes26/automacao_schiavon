@@ -23,6 +23,7 @@ from domain import alertas as alr
 from domain.config import Config
 from domain import sistemas as sis
 from domain.service.agendamento_service import fluxos_atrasados
+from domain.service import notificacao_service
 from domain.service.processo_service import SCHEMA
 
 log = get_logger(__name__)
@@ -134,10 +135,14 @@ def _notificar(config: Config, tipo: alr.TipoAlerta, origem: str | None, mensage
     )
     try:
         res = enviar_email(config.smtp, destino, assunto, html)
-        return res.get("status") == "sent"
     except ConfigException as exc:
         log.warning("monitor: alerta registrado, e-mail nao enviado - %s", exc)
         return False
+    if res.get("status") != "sent":
+        notificacao_service.registrar_erro(
+            "envio de alerta do monitor", mensagem=res.get("error", "falha SMTP"))
+        return False
+    return True
 
 
 def _resolver_alertas(conn, tipo: alr.TipoAlerta, chaves_ativas: list[str]) -> int:

@@ -179,6 +179,17 @@ flowchart TD
   abre `alerta` (dedupe + e-mail à operação) para sistema crítico com acesso
   falho ou fluxo parado há > 12 h. O alerta se resolve sozinho quando a causa
   some. Login em cada sistema chama `sistema_service.registrar_acesso`.
+- **E-mails (spec `.claude/rules/spec-notificacao-email.md`):**
+  - *Cliente:* ao fim da Conciliação ERP, **um e-mail por invoice** (limite de
+    25 MB do Outlook), com o `.docx` dela anexado; o assunto diz *Divergência*
+    ou *Conciliação*. Vai para `DESTINATARIOS_CLIENTE`
+    (`domain/config.py`). `bpo@rokkasmarket.com` está comentado até validar o
+    envio; para ligar, descomente a linha.
+  - *Erro:* qualquer falha (BD, login SharePoint, elemento não achado no
+    Catapult, falha de e-mail, fluxo que caiu) é registrada em
+    `notificacao_service.registrar_erro` e o controller envia **um** e-mail
+    consolidado, com traceback, a `ALERTA_EMAIL` (default `dataguvi@gmail.com`).
+    Aborto antes dos fluxos (profile/banco inválido) só aparece no log.
 - **Reprocesso:** casos em `processo` com `cod_status` na faixa 50–59 são
   reprocessáveis; caem sozinhos na fila quando um sinônimo/alias novo pode
   ter destravado a nota (`domain/service/conciliacao_service.py::marcar_*`).
