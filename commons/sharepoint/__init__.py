@@ -16,6 +16,15 @@ log = get_logger(__name__)
 
 #_LIMITE_DOWNLOAD_TESTE: int | None
 
+# Viewport largo: em 1280x720 (padrao do headless) a command bar do SharePoint
+# colapsa no menu "...", e os seletores dos botoes individuais deixam de achar.
+VIEWPORT = {"width": 1920, "height": 945}
+
+
+def _novo_contexto(browser):
+    """Contexto do SharePoint: viewport fixo e downloads habilitados."""
+    return browser.new_context(viewport=VIEWPORT, accept_downloads=True)
+
 
 # Step: nome de pasta (str) ou função que recebe a listagem e retorna a pasta
 Step = str | Callable[[list[dict]], dict | None]
@@ -789,7 +798,7 @@ def open_sharepoint_session(username: str, password: str, site_url: str, headles
 
     pw = sync_playwright().start()
     browser = pw.chromium.launch(headless=headless)
-    context = browser.new_context()
+    context = _novo_contexto(browser)
     page = context.new_page()
 
     page.goto(site_url, wait_until="domcontentloaded", timeout=60_000)
@@ -809,7 +818,7 @@ def process_all_configs(
     username: str,
     password: str,
     resolve_reference: Callable[[dict], date],
-    headless: bool = False,
+    headless: bool = True,
     keep_open: bool = False,
     download_dir: Path | None = None,
     skip_dirs: list[Path] | None = None,
@@ -833,7 +842,7 @@ def process_all_configs(
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
-        context = browser.new_context()
+        context = _novo_contexto(browser)
         page = context.new_page()
 
         for record in records:
