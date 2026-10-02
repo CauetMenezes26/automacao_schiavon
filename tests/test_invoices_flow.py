@@ -11,6 +11,18 @@ def test_subpastas_nao_contam_como_arquivo_encontrado():
     assert _contar_arquivos(entries) == 0
 
 
+def test_pasta_da_semana_sem_fallback_para_a_semana_anterior():
+    """A semana anterior e varrida por conta propria (R4); o fallback gravava
+    os arquivos dela no caso da semana atual (R7)."""
+    from datetime import date
+
+    from commons.sharepoint import resolve_week_folder
+
+    pastas = [{"name": "21 A 27", "type": "pasta"}]
+    assert resolve_week_folder(pastas, date(2026, 9, 25))["name"] == "21 A 27"
+    assert resolve_week_folder(pastas, date(2026, 10, 2)) is None
+
+
 def test_conta_so_os_arquivos_soltos():
     entries = [
         {"name": "LANCADAS", "type": "pasta"},

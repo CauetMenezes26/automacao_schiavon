@@ -115,22 +115,11 @@ def resolve_week_folder(entries: list[dict], reference: date | None = None) -> d
     de pasta: 'DD A DD' (ex: '15 A 21'). Também aceita variações como
     '15 a 21' e '15-21'.
 
-    Se a pasta da semana de referência não for encontrada, tenta a pasta
-    de 7 dias antes como fallback.
+    Sem fallback para a semana anterior: a coleta já varre as duas semanas
+    em toda execução (spec-coleta-arquivos-soltos R7).
     """
     ref = reference or date.today()
-    match = _match_week_folder(entries, ref.day)
-    if match:
-        return match
-
-    fallback_day = (ref - timedelta(days=7)).day
-    match = _match_week_folder(entries, fallback_day)
-    if match:
-        log.warning(
-            "Semana do dia %s nao encontrada, usando semana anterior: %s",
-            ref.day, match['name'],
-        )
-    return match
+    return _match_week_folder(entries, ref.day)
 
 
 def build_nav_steps(reference: date | None = None) -> list[Step]:
@@ -1009,7 +998,7 @@ def process_all_configs(
     records: list[dict],
     username: str,
     password: str,
-    resolve_reference: Callable[[dict], date],
+    resolve_references: Callable[[dict], list[date]],
     headless: bool = True,
     keep_open: bool = False,
     download_dir: Path | None = None,
@@ -1020,12 +1009,9 @@ def process_all_configs(
     Abre o Chromium UMA VEZ, faz login e processa cada config em sequência.
     Retorna lista de dicionários com record, status, final_path e entries.
 
-    `resolve_reference(record)` decide, POR record, qual semana navegar —
-    cada config pode cair numa referência diferente (ex.: uma loja retomando
-    a semana anterior porque ainda não fechou o download dela, enquanto outra
-    já avança pra semana nova). O resultado de cada record carrega essa
-    referência em `"referencia"`, pra quem grava o caso usar a semana que
-    REALMENTE foi navegada, não uma fixa.
+    `resolve_references(record)` devolve as semanas a navegar para o record
+    (hoje: a anterior e a atual). Cada par (record, semana) gera um resultado,
+    que carrega a semana em `"referencia"` para quem grava o caso.
     """
     from playwright.sync_api import sync_playwright
 
@@ -1037,11 +1023,12 @@ def process_all_configs(
         context = _novo_contexto(browser)
         page = context.new_page()
 
-        for record in records:
-            referencia = resolve_reference(record)
+        pares = [(record, ref) for record in records for ref in resolve_references(record)]
+        for record, referencia in pares:
             nav_steps = build_nav_steps(referencia)
 
-            log.info("[%s] %s", record['id'], record['name'])
+            log.info("[%s] %s - semana do dia %s",
+                     record['id'], record['name'], referencia.strftime('%d/%m/%Y'))
 
             status = False
             final_path: str | None = None

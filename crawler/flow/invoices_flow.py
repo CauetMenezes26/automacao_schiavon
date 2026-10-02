@@ -25,7 +25,6 @@ from domain.service.invoice_service import (
     fetch_all_configs,
     registrar_download,
     registrar_navegacao,
-    resolver_referencia_coleta,
 )
 from domain.service import notificacao_service, sistema_service
 from domain.sistemas import Sistema
@@ -72,30 +71,22 @@ def _coletar(config: Config) -> None:
     api_key = config.vision.api_key
     ai_model = config.vision.modelo
     today = date.today()
-    ref_date = date.today() #last_week_reference(today)
-    ref_anterior = last_week_reference(ref_date)
+    # Semana anterior + atual em toda execucao: o cliente pode incluir nota na
+    # pasta da semana anterior dias depois. Arquivo ja baixado e pulado pelo
+    # nome, entao revarrer so traz o que e novo (spec-coleta-arquivos-soltos R4).
+    referencias = [last_week_reference(today), today]
 
     log.info("Data : %s", today.strftime('%d/%m/%Y'))
-    log.info(
-        "Caminho : Invoices Fornecedores / %s / _Invoices para Lancamento / %s / semana do dia %s [download aqui]",
-        current_year_folder(ref_date), current_month_folder(ref_date), ref_date.day,
-    )
+    for ref in referencias:
+        log.info(
+            "Caminho : Invoices Fornecedores / %s / _Invoices para Lancamento / %s / semana do dia %s",
+            current_year_folder(ref), current_month_folder(ref), ref.day,
+        )
 
     with conexao(config.banco) as conn:
         records = fetch_all_configs(conn)
         all_output: list[dict] = []
         log.info("%s config(s) encontrado(s) no banco.", len(records))
-
-        def resolve_reference(record: dict) -> date:
-            """Por loja: não avança pra semana nova sem fechar a anterior
-            (regra de negocio — ver `resolver_referencia_coleta`)."""
-            referencia = resolver_referencia_coleta(conn, record["id"], ref_date, ref_anterior)
-            if referencia != ref_date:
-                log.warning(
-                    "AVISO: loja %s - semana de %s ainda nao finalizou o download; retomando antes de avancar para %s.",
-                    record['id'], ref_anterior.strftime('%d/%m/%Y'), ref_date.strftime('%d/%m/%Y'),
-                )
-            return referencia
 
         def on_record_done(r: dict) -> None:
             """Fecha o caso 'coleta' desta loja.
@@ -146,7 +137,7 @@ def _coletar(config: Config) -> None:
             })
 
         process_all_configs(
-            records, username, password, resolve_reference,
+            records, username, password, lambda record: referencias,
             headless=True,
             keep_open=False,
             download_dir=DOWNLOAD_DIR,

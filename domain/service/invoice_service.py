@@ -92,19 +92,6 @@ def fetch_all_configs(conn) -> list[dict]:
 # Caso 'coleta' — a varredura
 # ---------------------------------------------------------------------------
 
-# Desfechos que fecham a semana anterior para a varredura da loja.
-# Terminais de sucesso do fluxo COLETA (`domain/enums.py:Etapa.BAIXAR.e_a_ultima`);
-# pasta vazia (`ENCERRADO_SEM_ARQUIVO`) conta como completa — não é erro. Pasta
-# não encontrada (`ERRO_NAVEGACAO`) também fecha: a loja não entregou aquela
-# semana, e insistir nela para sempre impedia a semana atual de ser coletada.
-# `ERRO_LOGIN` NÃO fecha — é indisponibilidade do SharePoint, e a semana
-# anterior ainda precisa ser baixada quando ele voltar.
-_COLETA_FECHADA = (
-    Status.FINALIZADO, Status.FINALIZADO_COM_ALERTA, Status.ENCERRADO_SEM_ARQUIVO,
-    Status.ERRO_NAVEGACAO,
-)
-
-
 def abrir_coleta(conn, id_loja: int, referencia: date) -> int:
     """Abre (ou recupera) o caso da varredura desta loja nesta semana."""
     return proc.abrir(
@@ -114,25 +101,6 @@ def abrir_coleta(conn, id_loja: int, referencia: date) -> int:
         id_loja=id_loja,
         dt_origem=referencia,
     )
-
-
-def resolver_referencia_coleta(
-    conn, id_loja: int, referencia_nova: date, referencia_anterior: date,
-) -> date:
-    """Decide qual semana navegar nesta execução para esta loja: a nova, ou a
-    anterior se ela ainda não fechou o download de todos os arquivos (regra de
-    negócio — não avança pra semana nova sem fechar a anterior, por loja).
-    Pasta da semana anterior inexistente (`ERRO_NAVEGACAO`) conta como fechada
-    (ver `_COLETA_FECHADA`).
-
-    Ausência de caso para a semana anterior também conta como "não completa"
-    (nunca rodou) — converge sozinho: o robô navega a anterior uma vez, fecha
-    o caso dela, e no tick seguinte já libera a nova. Quem chama decide o que
-    fazer com um retorno != `referencia_nova` (hoje, avisar no log)."""
-    caso_anterior = proc.buscar(conn, "coleta", f"loja{id_loja}:{referencia_anterior:%Y-%m-%d}")
-    completo = (caso_anterior is not None
-                and Status(caso_anterior["cod_status"]) in _COLETA_FECHADA)
-    return referencia_nova if completo else referencia_anterior
 
 
 def registrar_navegacao(
