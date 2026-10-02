@@ -400,16 +400,21 @@ def _handle_microsoft_login(page, username: str, password: str) -> None:
         page.keyboard.press("Enter")
 
         page.wait_for_selector('input[name="passwd"]', timeout=15_000)
-        page.fill('input[name="passwd"]', password)
+        _preencher_campo(page, 'input[name="passwd"]', password)
         page.click('input[type="submit"]')
 
         # Espera um DESFECHO real do envio da senha: saiu do portal, erro de
         # senha ou o prompt "continuar conectado". Esperar tambem por
         # `loginfmt`/`#usernameError` (que ficam no DOM da tela de senha)
         # fazia a espera voltar na hora, antes de o portal processar o envio.
-        page.wait_for_function(_JS_DESFECHO_LOGIN, timeout=30_000)
+        if not _aguardar_desfecho(page, 10_000):
+            # Clique nao surtiu efeito (visto em headless/Linux): reenvia com Enter.
+            log.warning("[login] senha enviada sem resposta em 10s; reenviando com Enter")
+            page.keyboard.press("Enter")
+            page.wait_for_function(_JS_DESFECHO_LOGIN, timeout=30_000)
 
     except PwTimeout as exc:
+        _logar_campos_login(page)
         recusa = _texto_erro_visivel(page, "#usernameError")
         _debug_dump(page, "login_recusado" if recusa else "timeout_pos_submit")
         if recusa:
@@ -439,6 +444,26 @@ _JS_DESFECHO_LOGIN = """() => {
 }"""
 
 
+def _aguardar_desfecho(page, timeout_ms: int) -> bool:
+    """True se o login chegou a um desfecho dentro do prazo; False se estourou."""
+    from playwright.sync_api import TimeoutError as PwTimeout
+
+    try:
+        page.wait_for_function(_JS_DESFECHO_LOGIN, timeout=timeout_ms)
+    except PwTimeout:
+        return False
+    return True
+
+
+def _logar_campos_login(page) -> None:
+    """Diagnostico sem segredo: so o TAMANHO do que ficou nos campos de login."""
+    for nome in ("loginfmt", "passwd"):
+        campo = page.query_selector(f'input[name="{nome}"]')
+        if campo:
+            log.info("[debug] campo %s: visivel=%s tamanho_do_valor=%s",
+                     nome, campo.is_visible(), len(campo.input_value()))
+
+
 def _texto_erro_visivel(page, seletor: str) -> str:
     """Texto do elemento de erro se ele esta visivel; vazio caso contrario."""
     el = page.query_selector(seletor)
@@ -447,19 +472,22 @@ def _texto_erro_visivel(page, seletor: str) -> str:
     return ""
 
 
-def _preencher_usuario(page, username: str) -> None:
-    """Preenche o campo de usuario e confere que o valor ficou la.
+def _preencher_campo(page, seletor: str, valor: str) -> None:
+    """Preenche um campo do login e confere que o valor ficou la.
 
     Em headless/Linux o `fill` as vezes nao fica registrado pela pagina da
-    Microsoft (ela rejeita o envio com "Enter a valid email address..."). Se o
-    valor lido nao bate, limpa e digita tecla a tecla.
+    Microsoft. Se o valor lido nao bate, limpa e digita tecla a tecla.
     """
-    campo = page.locator('input[name="loginfmt"]')
-    campo.fill(username)
-    if campo.input_value() != username:
-        log.warning("[login] campo de usuario nao registrou o fill; digitando tecla a tecla")
+    campo = page.locator(seletor)
+    campo.fill(valor)
+    if campo.input_value() != valor:
+        log.warning("[login] campo %s nao registrou o fill; digitando tecla a tecla", seletor)
         campo.fill("")
-        campo.press_sequentially(username, delay=40)
+        campo.press_sequentially(valor, delay=40)
+
+
+def _preencher_usuario(page, username: str) -> None:
+    _preencher_campo(page, 'input[name="loginfmt"]', username)
 
 
 def _confirmar_saida_do_portal(page) -> None:
