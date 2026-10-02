@@ -153,6 +153,7 @@ flowchart TD
 | `python main.py` | Roda os fluxos ativos, em ordem. Sem flags. |
 | `python -m pytest` | Testes, em memória, sem Postgres. Devem passar. |
 | `python -m manutencao.teste_servidor [--email] [--login]` | Smoke test do servidor (banco, Chromium, Claude, Sheets, Gmail, SMTP); somente leitura |
+| `python -m manutencao.sharepoint_loja [--loja N] [--janela]` | Lista as pastas das 2 semanas da loja (default 2, Dr. Phillips); `--janela` abre o navegador logado. Somente leitura |
 | `python -m manutencao.teste_conciliacao_erp` | Teste manual da conciliação ERP (não grava) |
 | `python -m manutencao.<nome>` | Scripts de manutenção: simulam por padrão, gravam só com `--aplicar` |
 
