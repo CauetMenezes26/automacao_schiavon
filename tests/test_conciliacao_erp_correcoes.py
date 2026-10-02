@@ -33,21 +33,19 @@ def test_insumo_nao_e_conferido():
 
 
 # R3
-def test_nota_nao_tentada_prende_a_loja():
-    headers, presas = flow._selecionar_headers([_h(1, 10, int(StatusExecucao.PENDENTE))], [_h(2, 10), _h(3, 20)], [])
-    assert presas == {10}
-    assert [h["id"] for h in headers] == [1, 3]
+def test_nota_nao_tentada_da_semana_anterior_nao_prende_a_semana_atual():
+    headers = flow._selecionar_headers([_h(1, 10, int(StatusExecucao.PENDENTE))], [_h(2, 10), _h(3, 20)], [])
+    assert [h["id"] for h in headers] == [1, 2, 3]
 
 
-def test_nota_em_erro_nao_prende_a_loja():
-    headers, presas = flow._selecionar_headers([_h(1, 10, int(StatusExecucao.ERRO_NAVEGACAO))], [_h(2, 10)], [])
-    assert presas == set()
+def test_nota_em_erro_entra_junto_com_a_semana_atual():
+    headers = flow._selecionar_headers([_h(1, 10, int(StatusExecucao.ERRO_NAVEGACAO))], [_h(2, 10)], [])
     assert [h["id"] for h in headers] == [1, 2]
 
 
 # R4
 def test_reprocesso_entra_sem_duplicar():
-    headers, _ = flow._selecionar_headers([], [_h(2, 10)], [_h(2, 10), _h(9, 10)])
+    headers = flow._selecionar_headers([], [_h(2, 10)], [_h(2, 10), _h(9, 10)])
     assert [h["id"] for h in headers] == [2, 9]
 
 

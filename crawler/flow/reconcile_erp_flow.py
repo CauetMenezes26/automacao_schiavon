@@ -56,7 +56,7 @@ from conciliacao.relatorio_divergencia import NOME_LOJA, gerar_relatorio_diverge
 from conciliacao.relatorio_sucesso import gerar_relatorio_sucesso_erp
 from domain.service import notificacao_service
 from domain.config import Config
-from domain.enums import Etapa, StatusExecucao as Status, e_erro_tecnico
+from domain.enums import Etapa, StatusExecucao as Status
 from domain.service import processo_service as proc
 from domain.service import sistema_service
 from domain.service.conciliacao_service import (
@@ -98,19 +98,15 @@ def reconcile_erp_flow(
         termos_erp = fetch_erp_search_terms(conn)
         aliases_invoice = fetch_supplier_aliases(conn, source="invoice")
 
-        # Regra de negocio: por loja, nao avanca pra semana nova sem fechar a
-        # anterior. So prende a nota AINDA NAO TENTADA; nota em erro tecnico
-        # (50-59) e retentada junto, mas nao bloqueia a semana nova.
+        # Semana anterior + atual em toda execucao, sem prender loja: a coleta
+        # tambem varre as duas (spec-correcao-reconcile-erp R3). Nota ja
+        # conciliada nao volta, entao so entra o que ainda esta pendente.
         inicio_ant, fim_ant = week_bounds(date_from - timedelta(days=7))
+        log.info("Semana anterior - %s a %s", inicio_ant, fim_ant)
         pendentes_anterior = fetch_invoice_headers_for_reconciliation(conn, inicio_ant, fim_ant)
         headers_novos = fetch_invoice_headers_for_reconciliation(conn, date_from, date_to)
         reprocesso = fetch_invoice_headers_reprocesso(conn)
-        headers, lojas_presas = _selecionar_headers(pendentes_anterior, headers_novos, reprocesso)
-        if lojas_presas:
-            log.warning(
-                "AVISO: loja(s) %s - semana de %s ainda tem nota pendente de conciliar contra o PO; retomando antes de avancar para %s.",
-                sorted(lojas_presas), inicio_ant, date_from,
-            )
+        headers = _selecionar_headers(pendentes_anterior, headers_novos, reprocesso)
 
         if not headers:
             log.info("Nenhuma invoice no periodo.")
@@ -174,29 +170,17 @@ def reconcile_erp_flow(
 
 def _selecionar_headers(
     pendentes_anterior: list[dict], headers_novos: list[dict], reprocesso: list[dict],
-) -> tuple[list[dict], set[int]]:
-    """Une as tres listas de notas a conciliar, sem duplicar por `id`.
-
-    Devolve `(headers, lojas_presas)`. Loja presa e a que tem nota da semana
-    anterior ainda nao tentada (`cod_status` fora da faixa de erro): as notas
-    novas dela ficam de fora. Nota em erro tecnico volta a ser tentada, mas nao
-    prende a loja. Reprocesso explicito (status 56) entra sempre.
-    """
-    lojas_presas = {
-        h["id_loja"] for h in pendentes_anterior if not e_erro_tecnico(h.get("cod_status"))
-    }
-    candidatos = (
-        pendentes_anterior
-        + [h for h in headers_novos if h["id_loja"] not in lojas_presas]
-        + reprocesso
-    )
+) -> list[dict]:
+    """Une as tres listas de notas a conciliar (semana anterior, atual e
+    reprocesso explicito, status 56), sem duplicar por `id`. Nenhuma loja fica
+    presa: as duas semanas entram sempre."""
     vistos: set[int] = set()
     headers = []
-    for h in candidatos:
+    for h in pendentes_anterior + headers_novos + reprocesso:
         if h["id"] not in vistos:
             vistos.add(h["id"])
             headers.append(h)
-    return headers, lojas_presas
+    return headers
 
 
 def _conciliar_loja(
