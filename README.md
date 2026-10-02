@@ -32,7 +32,7 @@ Uma execução de `python main.py` faz **uma passada** e termina, nesta ordem
 | — | ~~Cotação~~ | **Desativado por enquanto** (comentado no controller) |
 | 3 | Conciliação ERP | Invoice × PO do Catapult → `fat_conciliacao`, relatórios `.docx`, e-mail ao cliente |
 | 4 | Monitor | Consolida acesso por sistema e abre/fecha alertas à operação |
-| 5 | Painel | Consolida a semana corrente em `files/relatorios/painel_operacao.xlsx` |
+| — | ~~Painel~~ | **Desativado**: `painel_operacao.xlsx` não é mais gerado (comentado no controller) |
 
 Cada fluxo roda isolado: se um falha, os outros seguem. O resumo no fim lista
 OK/ERRO e o processo sai com código 1 se algo falhou.
@@ -86,8 +86,7 @@ flowchart TD
     F1 --> F2[2. Invoices<br/>SharePoint + Claude Vision]
     F2 --> F3[3. Conciliacao ERP<br/>Invoice x PO do Catapult]
     F3 --> F4[4. Monitor<br/>acesso por sistema e alertas]
-    F4 --> F5[5. Painel<br/>painel_operacao.xlsx]
-    F5 --> Z[Heartbeat, e-mail de erro e resumo]
+    F4 --> Z[Heartbeat, e-mail de erro e resumo]
 
     F2 -.-> COT[Cotacao semanal<br/>desativada]
 

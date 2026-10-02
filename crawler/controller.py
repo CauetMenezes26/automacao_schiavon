@@ -10,7 +10,7 @@ ordem.
     FLUXO 3/6  Cotação semanal de carnes (um passo do ciclo)
     FLUXO 4/6  Conciliação invoice x PO do Catapult (ERP) — toda nota
     FLUXO 5/6  Monitor — consolida status dos sistemas e alerta a operação
-    FLUXO 6/6  Painel — relatório cotação x invoice (files/relatorios)
+    FLUXO 6/6  Painel — DESATIVADO (painel_operacao.xlsx não é mais gerado)
 
 Fino de propósito: monta o `Pipeline` (`crawler/pipeline.py`) e chama uma
 fachada por fluxo. Sem argparse, sem recorte. As fachadas de fluxo migram para
@@ -31,7 +31,8 @@ from commons.logging_config import get_logger
 from crawler.flow.cotacao_flow import cotacao_flow
 from crawler.flow.invoices_flow import invoices_flow
 from crawler.flow.monitor_flow import monitor_flow
-from crawler.flow.painel_flow import painel_flow
+# Painel (painel_operacao.xlsx) — desativado, ver FLUXO 6/6 abaixo.
+# from crawler.flow.painel_flow import painel_flow
 from crawler.flow.reconcile_erp_flow import reconcile_erp_flow
 from crawler.flow.sinonimos_flow import sinonimos_flow
 from crawler.pipeline import Pipeline
@@ -41,7 +42,7 @@ from domain.service.agendamento_service import registrar_heartbeat
 
 log = get_logger(__name__)
 
-TOTAL_FLUXOS = 5
+TOTAL_FLUXOS = 4
 
 
 def executar() -> None:
@@ -114,13 +115,13 @@ def _rodar_fluxos(config: Config, pipeline: Pipeline) -> None:
     pipeline.rodar(4, "Monitor", lambda: monitor_flow(config))
 
     # ------------------------------------------------------------------
-    # FLUXO 6/6 -- Relatorio Cotacao x Invoice
-    # Consolida a comparacao de preco da semana corrente em duas abas de
-    # files/relatorios/painel_operacao.xlsx (cotacao x invoice item a item, e
-    # so as divergencias) - o relatorio que o cliente abre. So le do banco;
-    # roda mesmo que os fluxos acima tenham falhado.
+    # FLUXO 6/6 -- Relatorio Cotacao x Invoice (DESATIVADO)
+    # Gerava files/relatorios/painel_operacao.xlsx. Desligado a pedido do
+    # usuario (2026-10-02): o arquivo nao deve mais ser gerado. Chamada
+    # comentada, nao removida, como a cotacao - religar e so descomentar
+    # (e voltar TOTAL_FLUXOS para 5). Ver spec-painel-desativado.md.
+    # pipeline.rodar(5, "Painel", lambda: painel_flow(config))
     # ------------------------------------------------------------------
-    pipeline.rodar(5, "Painel", lambda: painel_flow(config))
 
     # Heartbeat do agendamento: registra esta execução e projeta a próxima
     # pela cron. Antes do resumo() porque ele sai com código 1.
