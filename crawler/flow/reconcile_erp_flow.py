@@ -66,6 +66,7 @@ from domain.service.conciliacao_service import (
     fetch_invoice_items_by_headers,
     fetch_item_sinonimos,
     fetch_supplier_aliases,
+    ja_conciliada_erp,
     save_reconciliation_header,
     save_reconciliation_items,
 )
@@ -474,6 +475,8 @@ def _gravar_resultado(
         "has_issue": resultado["has_issue"],
         "needs_review": resultado["needs_review"],
     }
+    # Antes de gravar: nota ja conciliada nao reenvia e-mail (spec RF-06).
+    ja_reportada = ja_conciliada_erp(conn, header["id"])
     recon_header_id = save_reconciliation_header(conn, header_row)
     save_reconciliation_items(conn, recon_header_id, resultado["items"])
     _sincronizar_pendentes(header, resultado["items"], sheet_id, totais)
@@ -483,7 +486,7 @@ def _gravar_resultado(
         conn, header["id_processo"], Etapa.CONCILIAR_ERP,
         com_alerta=resultado["needs_review"],
     )
-    _gerar_relatorios(header, resultado, totais)
+    _gerar_relatorios(header, resultado, totais, notificar=not ja_reportada)
 
     totais["headers_total"] += 1
     if resultado["has_issue"]:
@@ -505,13 +508,17 @@ def _gravar_resultado(
     )
 
 
-def _gerar_relatorios(header: dict, resultado: dict, totais: dict) -> None:
+def _gerar_relatorios(
+    header: dict, resultado: dict, totais: dict, notificar: bool = True,
+) -> None:
     """Gera o .docx desta invoice: divergência (`conciliacao/relatorio_
     divergencia.py`) se algum item diverge, sucesso (`conciliacao/relatorio_
     sucesso.py`) se a nota inteira bateu — os dois são mutuamente exclusivos,
     cada gerador devolve `None` quando não é a vez dele. Secundário ao
     resultado principal, já gravado no banco — falha aqui não derruba a
-    conciliação da nota; só conta em `totais` para aparecer no resumo."""
+    conciliação da nota; só conta em `totais` para aparecer no resumo.
+    `notificar=False` (nota já reportada antes) regera o .docx mas não o põe na
+    fila de e-mail ao cliente."""
     nota = header.get("invoice_number")
     divergencia, falhou = gerar_com_seguranca(
         lambda: gerar_relatorio_divergencia_erp(header, resultado),
@@ -533,7 +540,9 @@ def _gerar_relatorios(header: dict, resultado: dict, totais: dict) -> None:
         notificacao_service.registrar_erro(f"relatorio .docx sucesso nota {nota}",
                                            mensagem="falha gerando o .docx")
     gerado = divergencia or sucesso
-    if gerado is not None:
+    if gerado is not None and not notificar:
+        log.info("nota %s: ja reportada ao cliente antes, e-mail nao reenviado", nota)
+    elif gerado is not None:
         itens = resultado["items"]
         totais["relatorios_cliente"].append(notificacao_service.RelatorioNota(
             invoice=str(nota or f"id{header['id']}"),

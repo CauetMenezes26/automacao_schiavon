@@ -259,3 +259,37 @@ def test_controller_envia_erros_mesmo_se_cair_entre_fluxos(monkeypatch):
         controller.executar()
     assert enviou == [True]
     assert "controller" in ns._ERROS[0].contexto
+
+
+def _fluxo_com(monkeypatch, tmp_path, ja_conciliada):
+    """Roda `_gravar_resultado` com o banco e os geradores de .docx trocados."""
+    from crawler.flow import reconcile_erp_flow as rf
+
+    rel = tmp_path / "d.docx"
+    rel.write_bytes(b"x")
+    monkeypatch.setattr(rf, "ja_conciliada_erp", lambda conn, id_: ja_conciliada)
+    monkeypatch.setattr(rf, "save_reconciliation_header", lambda conn, d: 1)
+    monkeypatch.setattr(rf, "save_reconciliation_items", lambda *a: None)
+    monkeypatch.setattr(rf, "_sincronizar_pendentes", lambda *a: None)
+    monkeypatch.setattr(rf.proc, "concluir_etapa", lambda *a, **k: None)
+    monkeypatch.setattr(rf, "gerar_relatorio_divergencia_erp", lambda h, r: rel)
+    monkeypatch.setattr(rf, "gerar_relatorio_sucesso_erp", lambda h, r: None)
+    header = {"id": 7, "id_loja": 1, "id_processo": 9, "invoice_number": "123"}
+    resultado = {"issue_codes": [], "has_issue": True, "needs_review": False,
+                 "items": [{"has_issue": True}], "po_orphans": []}
+    totais = {"relatorios_erro": 0, "relatorios_gerados": 0, "sucessos_erro": 0,
+              "sucessos_gerados": 0, "headers_total": 0, "headers_issue": 0,
+              "items_total": 0, "items_issue": 0, "relatorios_cliente": []}
+    rf._gravar_resultado(None, header, resultado, None, totais)
+    return totais
+
+
+def test_nota_ja_conciliada_nao_reenvia_email(monkeypatch, tmp_path):
+    totais = _fluxo_com(monkeypatch, tmp_path, ja_conciliada=True)
+    assert totais["relatorios_cliente"] == []
+    assert totais["relatorios_gerados"] == 1  # .docx regerado, so nao vai no e-mail
+
+
+def test_primeira_conciliacao_entra_na_fila_de_email(monkeypatch, tmp_path):
+    totais = _fluxo_com(monkeypatch, tmp_path, ja_conciliada=False)
+    assert len(totais["relatorios_cliente"]) == 1

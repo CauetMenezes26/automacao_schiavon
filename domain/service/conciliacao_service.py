@@ -270,6 +270,19 @@ def fetch_invoice_headers_for_reconciliation(
     return _ler(conn, sql, params, "invoices a conciliar")
 
 
+def ja_conciliada_erp(conn, id_invoice: int) -> bool:
+    """True se a nota ja tem conciliacao ERP gravada (ja foi reportada ao cliente)."""
+    rows = _ler(
+        conn,
+        f"""
+        SELECT 1 FROM {SCHEMA}.fat_conciliacao
+         WHERE id_invoice = %s AND comparacao = 'erp'
+        """,
+        (id_invoice,), "conciliacao ERP existente",
+    )
+    return bool(rows)
+
+
 def fetch_invoice_headers_reprocesso(conn) -> list[dict]:
     """Notas marcadas para reconciliar de novo (processo.cod_status = 56).
 
