@@ -61,7 +61,8 @@ def enviar_email(
     (retorna `status='error'`), mas levanta `ConfigException` se o profile não
     tem as chaves — quem chama decide o que fazer com config ausente.
 
-    `anexos`: arquivos a anexar; caminho inexistente e ignorado com WARNING."""
+    `anexos`: arquivos a anexar; caminho inexistente ou ilegivel e ignorado com
+    WARNING e listado em `anexos_ignorados` no retorno."""
     faltando = smtp.faltando()
     if faltando:
         raise ConfigException(
@@ -77,18 +78,21 @@ def enviar_email(
     corpo.attach(MIMEText(corpo_txt or _html_para_txt(corpo_html), "plain", "utf-8"))
     corpo.attach(MIMEText(corpo_html, "html", "utf-8"))
     msg.attach(corpo)
-    for caminho in anexos:
-        _anexar(msg, Path(caminho))
+    ignorados = [
+        Path(c).name for c in anexos if not _anexar(msg, Path(c))
+    ]
 
     try:
         with _abrir_conexao(smtp) as server:
             server.login(smtp.usuario, smtp.senha)
             server.send_message(msg)
         log.info("e-mail enviado para %s", destino)
-        return {"status": "sent", "to": destino, "date_sent": agora}
+        return {"status": "sent", "to": destino, "date_sent": agora,
+                "anexos_ignorados": ignorados}
     except Exception as exc:  # noqa: BLE001 — o chamador loga/alerta
         log.error("falha ao enviar e-mail para %s: %s", destino, exc)
-        return {"status": "error", "to": destino, "date_sent": agora, "error": str(exc)}
+        return {"status": "error", "to": destino, "date_sent": agora,
+                "error": str(exc), "anexos_ignorados": ignorados}
 
 
 def _abrir_conexao(smtp: ConfigSmtp) -> smtplib.SMTP:
@@ -104,18 +108,25 @@ def _abrir_conexao(smtp: ConfigSmtp) -> smtplib.SMTP:
             smtp.host, porta, timeout=_TIMEOUT_S, context=ssl.create_default_context(),
         )
     server = smtplib.SMTP(smtp.host, porta, timeout=_TIMEOUT_S)
-    server.starttls()
+    try:
+        server.starttls()
+    except Exception:  # noqa: BLE001 — fecha o socket e repropaga ao chamador
+        server.close()
+        raise
     return server
 
 
-def _anexar(msg: MIMEMultipart, caminho: Path) -> None:
-    """Anexa o arquivo ao e-mail. Arquivo ausente/ilegivel e so aviso."""
-    if not caminho.is_file():
-        log.warning("anexo inexistente, ignorado: %s", caminho)
-        return
-    parte = MIMEApplication(caminho.read_bytes(), Name=caminho.name)
+def _anexar(msg: MIMEMultipart, caminho: Path) -> bool:
+    """Anexa o arquivo ao e-mail. Arquivo ausente/ilegivel e so aviso (False)."""
+    try:
+        conteudo = caminho.read_bytes()
+    except OSError as exc:
+        log.warning("anexo inexistente ou ilegivel, ignorado: %s (%s)", caminho, exc)
+        return False
+    parte = MIMEApplication(conteudo, Name=caminho.name)
     parte["Content-Disposition"] = f'attachment; filename="{caminho.name}"'
     msg.attach(parte)
+    return True
 
 
 def _html_para_txt(html: str) -> str:

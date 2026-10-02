@@ -48,6 +48,20 @@ def executar() -> None:
     imprimir_banner()
     config = carregar_config()
     pipeline = Pipeline(TOTAL_FLUXOS)
+    try:
+        _rodar_fluxos(config, pipeline)
+    except Exception as exc:  # noqa: BLE001 — registra para o e-mail e repropaga
+        notificacao_service.registrar_erro("controller: execucao interrompida", exc)
+        raise
+    finally:
+        # E-mail unico com todas as falhas da execucao (ver notificacao_service).
+        # No finally: sai mesmo se o controller cair entre fluxos. Nunca levanta.
+        notificacao_service.enviar_erros(config)
+
+    pipeline.resumo()
+
+
+def _rodar_fluxos(config: Config, pipeline: Pipeline) -> None:
 
     # registra em dim_sistema quais sistemas têm credencial no profile.
     # O resultado real de login durante os fluxos sobrescreve isto.
@@ -111,11 +125,6 @@ def executar() -> None:
     # Heartbeat do agendamento: registra esta execução e projeta a próxima
     # pela cron. Antes do resumo() porque ele sai com código 1.
     _gravar_heartbeat(config, pipeline.houve_erro)
-
-    # E-mail unico com todas as falhas da execucao (ver notificacao_service).
-    notificacao_service.enviar_erros(config)
-
-    pipeline.resumo()
 
 
 def _gravar_heartbeat(config: Config, houve_erro: bool) -> None:

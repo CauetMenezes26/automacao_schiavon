@@ -111,8 +111,13 @@ def enviar_erros(config: Config) -> bool:
         return False
     destino = config.alerta_email or _DEST_ERRO_PADRAO
     assunto = f"[RPA Schiavon] ERRO na execucao - {len(erros)} falha(s) - {config.ambiente}"
-    return _enviar(config, destino, assunto, _html_erros(erros, config.ambiente),
-                   _txt_erros(erros), "e-mail de erro")
+    enviou = _enviar(config, destino, assunto, _html_erros(erros, config.ambiente),
+                     _txt_erros(erros), "e-mail de erro")
+    if not enviou:
+        # Sem canal para avisar: o log e o que sobra para quem for investigar.
+        log.error("notificacao: %s falha(s) nao enviada(s) por e-mail:\n%s",
+                  len(erros), _txt_erros(erros))
+    return enviou
 
 
 def enviar_relatorios_cliente(config: Config, relatorios: list[RelatorioNota]) -> int:
@@ -136,7 +141,13 @@ def enviar_relatorios_cliente(config: Config, relatorios: list[RelatorioNota]) -
 def _enviar_nota(config: Config, rel: RelatorioNota) -> bool:
     """UM e-mail da invoice, com todos os destinatarios ativos juntos no Para."""
     anexo = rel.caminho
-    if anexo.is_file() and anexo.stat().st_size > LIMITE_ANEXO_BYTES:
+    if not anexo.is_file():
+        registrar_erro(
+            f"anexo ausente nota {rel.invoice}",
+            mensagem=f"{anexo.name} nao existe; enviado sem anexo",
+        )
+        anexo = None
+    elif anexo.stat().st_size > LIMITE_ANEXO_BYTES:
         registrar_erro(
             f"anexo grande demais nota {rel.invoice}",
             mensagem=f"{anexo.name} tem {anexo.stat().st_size} bytes; enviado sem anexo",
@@ -158,6 +169,9 @@ def _enviar(
         res = enviar_email(config.smtp, destino, assunto, html, txt, anexos or ())
     except ConfigException as exc:
         return _falhou(contexto, destino, exc, str(exc))
+    for nome in res.get("anexos_ignorados", ()):
+        registrar_erro(f"anexo ignorado em {contexto}",
+                       mensagem=f"{nome} nao pode ser lido; e-mail saiu sem ele")
     if res.get("status") == "sent":
         return True
     return _falhou(contexto, destino, None, res.get("error", "erro desconhecido"))
@@ -178,7 +192,7 @@ def _falhou(contexto: str, destino: str, exc: BaseException | None, motivo: str)
 
 def _html_cliente(rel: RelatorioNota, anexado: bool) -> str:
     anexo = (f"Relatorio em anexo: {escape(rel.caminho.name)}" if anexado
-             else "Relatorio nao anexado (arquivo grande demais); solicite a DataGuvi.")
+             else "Relatorio nao anexado (arquivo ausente ou grande demais); solicite a DataGuvi.")
     return (
         "<html><body style='font-family:Arial,sans-serif;color:#333'>"
         f"<h2>{rel.titulo}</h2>"

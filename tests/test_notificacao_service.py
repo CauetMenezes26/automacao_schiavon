@@ -186,3 +186,76 @@ def test_email_client_porta_465_usa_ssl_e_587_usa_starttls(monkeypatch, porta, u
     smtp = ec.ConfigSmtp("h", porta, "u", "s", "f@x.com")
     assert ec.enviar_email(smtp, "a@b.com", "x", "<p>y</p>")["status"] == "sent"
     assert usado == (["ssl"] if usa_ssl else ["plain", "starttls"])
+
+
+def test_anexo_ilegivel_nao_levanta_e_e_listado(monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from commons import email_client as ec
+
+    class FakeSMTP:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def starttls(self): pass
+        def login(self, *a): pass
+        def send_message(self, msg): pass
+
+    def trava(self):
+        raise PermissionError("travado")
+
+    monkeypatch.setattr(ec.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(Path, "read_bytes", trava)
+    doc = tmp_path / "r.docx"
+    doc.write_bytes(b"x")
+    smtp = ec.ConfigSmtp("h", "587", "u", "s", "f@x.com")
+    res = ec.enviar_email(smtp, "a@b.com", "x", "<p>y</p>", anexos=[doc])
+    assert res["status"] == "sent" and res["anexos_ignorados"] == ["r.docx"]
+
+
+def test_anexo_ausente_vai_sem_anexo_e_registra(enviados, tmp_path):
+    rel = _rel(tmp_path)
+    rel.caminho.unlink()
+    assert ns.enviar_relatorios_cliente(_cfg(), [rel]) == 1
+    assert enviados[0]["anexos"] == []
+    assert "Relatorio em anexo" not in enviados[0]["html"]
+    assert "anexo ausente" in ns._ERROS[0].contexto
+
+
+def test_anexo_ignorado_pelo_transporte_registra_erro(monkeypatch, tmp_path):
+    monkeypatch.setattr(ns, "enviar_email", lambda *a, **k: {
+        "status": "sent", "anexos_ignorados": ["r.docx"]})
+    assert ns.enviar_relatorios_cliente(_cfg(), [_rel(tmp_path)]) == 1
+    assert "anexo ignorado" in ns._ERROS[0].contexto
+
+
+def test_starttls_que_falha_fecha_o_socket(monkeypatch):
+    from commons import email_client as ec
+
+    fechado = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **k): pass
+        def starttls(self): raise OSError("handshake")
+        def close(self): fechado.append(True)
+
+    monkeypatch.setattr(ec.smtplib, "SMTP", FakeSMTP)
+    smtp = ec.ConfigSmtp("h", "587", "u", "s", "f@x.com")
+    res = ec.enviar_email(smtp, "a@b.com", "x", "<p>y</p>")
+    assert res["status"] == "error" and fechado == [True]
+
+
+def test_controller_envia_erros_mesmo_se_cair_entre_fluxos(monkeypatch):
+    from crawler import controller
+
+    enviou = []
+    monkeypatch.setattr(controller, "imprimir_banner", lambda: None)
+    monkeypatch.setattr(controller, "carregar_config", lambda: _cfg())
+    monkeypatch.setattr(controller, "_rodar_fluxos",
+                        lambda c, p: (_ for _ in ()).throw(RuntimeError("caiu")))
+    monkeypatch.setattr(controller.notificacao_service, "enviar_erros",
+                        lambda c: enviou.append(True))
+    with pytest.raises(RuntimeError):
+        controller.executar()
+    assert enviou == [True]
+    assert "controller" in ns._ERROS[0].contexto
